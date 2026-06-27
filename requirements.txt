@@ -1,0 +1,17 @@
+# Web service
+fastapi==0.111.0
+uvicorn[standard]==0.30.1
+python-multipart==0.0.9
+pydantic==2.7.4
+httpx==0.27.0
+python-dotenv==1.0.1
+
+# Imports
+opencv-python-headless==4.10.0.84
+numpy==1.26.4
+pymupdf==1.24.7
+
+# NOTE: cadquery + OpenCascade are NOT pip-reliable across platforms.
+# Install them via conda (see environment.yml). The API boots without them and
+# returns a clear 503 from /generate until the CAD env is present.
+# cadquery==2.4.0

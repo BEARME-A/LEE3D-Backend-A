@@ -1,0 +1,22 @@
+# One-click deploy on Render's free tier (Docker). Render builds the Dockerfile,
+# which installs the full CAD env. The free instance sleeps when idle — fine for
+# a hobby project; the local Docker route is genuinely $0 and always-on.
+services:
+  - type: web
+    name: lee3d-backend
+    runtime: docker
+    plan: free
+    healthCheckPath: /health
+    envVars:
+      - key: LEE3D_GITHUB_OWNER
+        value: BEARME-A
+      - key: LEE3D_LIB_REPO
+        value: LEE3D-Lib
+      - key: LEE3D_CORS_ORIGINS
+        value: https://bearme-a.github.io
+      - key: LEE3D_GITHUB_TOKEN
+        sync: false   # set in the Render dashboard, never in git
+    disk:
+      name: lee3d-data
+      mountPath: /data
+      sizeGB: 1
