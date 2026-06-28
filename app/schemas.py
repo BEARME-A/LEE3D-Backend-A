@@ -48,6 +48,12 @@ class Profile(BaseModel):
     topProfile: List[Point]
     bottomProfile: List[Point]
     widthProfile: List[Point]
+    # Optional normalized cross-section from a front view: [x_fraction, z_fraction] pairs.
+    # Accepted for round-trip + storage; the CadQuery generator currently lofts its own
+    # section, so this is forward-compatible metadata (used by the browser studio today).
+    section: Optional[List[Point]] = None
+    mode: Optional[str] = None              # 'loft' | 'projection' (studio reconstruction method)
+    frontHull: Optional[List[Point]] = None # absolute-mm front silhouette for projection mode
     wheels: List[Wheel] = []
     wheelLayout: Optional[WheelLayout] = None
 

@@ -1,0 +1,19 @@
+name: ci
+on: [push, pull_request]
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    defaults:
+      run: { shell: bash -l {0} }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: conda-incubator/setup-miniconda@v3
+        with:
+          environment-file: environment.yml
+          activate-environment: lee3d
+          auto-activate-base: false
+      - name: Import + smoke test
+        run: |
+          python -c "import app.main; print('app imports OK')"
+          python -c "import cadquery; print('cadquery', cadquery.__version__)"
+          python tests/test_cad.py
