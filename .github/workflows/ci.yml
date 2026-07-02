@@ -1,19 +1,30 @@
 name: ci
+
+# Fast, reliable CI. Installs only the lightweight deps and runs the tests that
+# don't need the CAD kernel. test_cad self-skips when cadquery isn't installed,
+# so we DON'T pay for a slow/flaky conda + OpenCascade solve on every push.
+# The CAD path is exercised locally via environment.yml (conda).
+
 on: [push, pull_request]
+
 jobs:
-  build:
+  test:
     runs-on: ubuntu-latest
-    defaults:
-      run: { shell: bash -l {0} }
     steps:
       - uses: actions/checkout@v4
-      - uses: conda-incubator/setup-miniconda@v3
+
+      - uses: actions/setup-python@v5
         with:
-          environment-file: environment.yml
-          activate-environment: lee3d
-          auto-activate-base: false
-      - name: Import + smoke test
+          python-version: '3.11'
+          cache: pip
+
+      - name: Install light deps (no CAD kernel)
         run: |
-          python -c "import app.main; print('app imports OK')"
-          python -c "import cadquery; print('cadquery', cadquery.__version__)"
-          python tests/test_cad.py
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt pytest
+
+      - name: App boots without the CAD kernel
+        run: python -c "import app.main; print('app imports OK')"
+
+      - name: Run tests (storage + schema full; CAD self-skips)
+        run: pytest -q
