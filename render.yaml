@@ -1,10 +1,18 @@
-# One-click deploy on Render's free tier (Docker). Render builds the Dockerfile,
-# which installs the full CAD env. The free instance sleeps when idle — fine for
-# a hobby project; the local Docker route is genuinely $0 and always-on.
+# Render Blueprint — deploys the backend as a live HTTPS service (this is the URL you
+# paste into the studio's "Backend URL", e.g. https://lee3d-backend.onrender.com).
+#
+# Defaults to the LIGHT image (Dockerfile.light): fast build, gets you ONLINE with image/PDF
+# import, projects, and library commit. STEP export returns 503 until you switch to full CAD.
+# For full CadQuery/STEP: change dockerfilePath to ./Dockerfile (heavy build; may need a
+# paid instance — the conda + OpenCascade image is large).
+#
+# Setup: Render dashboard -> New -> Blueprint -> pick this repo. Render auto-deploys on every
+# push (no GitHub Actions needed). Set LEE3D_GITHUB_TOKEN in the dashboard (never in git).
 services:
   - type: web
     name: lee3d-backend
     runtime: docker
+    dockerfilePath: ./Dockerfile.light   # <- change to ./Dockerfile for full CadQuery/STEP
     plan: free
     healthCheckPath: /health
     envVars:
@@ -12,6 +20,8 @@ services:
         value: BEARME-A
       - key: LEE3D_LIB_REPO
         value: LEE3D-Lib
+      - key: LEE3D_LIB_BRANCH
+        value: main
       - key: LEE3D_CORS_ORIGINS
         value: https://bearme-a.github.io
       - key: LEE3D_GITHUB_TOKEN
