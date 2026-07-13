@@ -1,18 +1,19 @@
-# CadQuery needs OpenCascade, so we build on the conda-forge base image.
-FROM continuumio/miniconda3:24.5.0-0
+# LIGHT image — deploys in ~2 min on any free tier and gets the backend ONLINE:
+#   /health, /import/image, /import/pdf, /projects, /library/commit all work.
+# STEP generation (/generate?fmt=step) returns a clear 503 because CadQuery/OpenCascade
+# aren't pip-reliable — use the full ./Dockerfile (conda) when you want CAD export.
+FROM python:3.11-slim
 
 WORKDIR /app
-COPY environment.yml .
-RUN conda env create -f environment.yml && conda clean -afy
+# runtime libs opencv-python-headless / pymupdf may need on slim
+RUN apt-get update && apt-get install -y --no-install-recommends libgl1 libglib2.0-0 \
+    && rm -rf /var/lib/apt/lists/*
 
-# Make the env's tools the default
-SHELL ["conda", "run", "-n", "lee3d", "/bin/bash", "-c"]
-ENV PATH=/opt/conda/envs/lee3d/bin:$PATH
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
 
 COPY app ./app
-EXPOSE 8000
 ENV LEE3D_DATA_DIR=/data
-VOLUME ["/data"]
-
-CMD ["conda", "run", "--no-capture-output", "-n", "lee3d", \
-     "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+EXPOSE 8000
+# bind to the platform's $PORT (Render/Railway/Fly set it); default 8000 locally
+CMD sh -c "uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000}"
