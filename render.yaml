@@ -1,9 +1,9 @@
 # Render Blueprint — deploys the backend as a live HTTPS service (this is the URL you
 # paste into the studio's "Backend URL", e.g. https://lee3d-backend.onrender.com).
 #
-# Defaults to the LIGHT image (Dockerfile.light): fast build, gets you ONLINE with image/PDF
+# The default ./Dockerfile is the LIGHT image: fast build, gets you ONLINE with image/PDF
 # import, projects, and library commit. STEP export returns 503 until you switch to full CAD.
-# For full CadQuery/STEP: change dockerfilePath to ./Dockerfile (heavy build; may need a
+# For full CadQuery/STEP: change dockerfilePath to ./Dockerfile.full (heavy build; may need a
 # paid instance — the conda + OpenCascade image is large).
 #
 # Setup: Render dashboard -> New -> Blueprint -> pick this repo. Render auto-deploys on every
@@ -12,7 +12,7 @@ services:
   - type: web
     name: lee3d-backend
     runtime: docker
-    dockerfilePath: ./Dockerfile.light   # <- change to ./Dockerfile for full CadQuery/STEP
+    dockerfilePath: ./Dockerfile        # default = LIGHT (fast). For full CAD/STEP: ./Dockerfile.full
     plan: free
     healthCheckPath: /health
     envVars:
