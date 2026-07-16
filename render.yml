@@ -1,0 +1,51 @@
+# Render Blueprint — puts the backend online as an HTTPS service. The URL it gives you
+# (https://<name>.onrender.com) is what goes in the BACKEND_URL repo variable; see SETUP.md.
+#
+# Setup: Render -> New -> Blueprint -> pick this repo. It redeploys on every push, so
+# there's no deploy workflow to maintain. Set LEE3D_GITHUB_TOKEN in the Render dashboard.
+#
+# The studio does NOT need this. Tracing, features, real cut-through openings, cloud saves
+# and reading the shared library all work in the browser with nothing installed. Hosting
+# this adds two things:
+#   * Publish to the shared library for everyone, with no GitHub token to hand out
+#     (the token lives here, on the server, where a token belongs)
+#   * "Build exact" — STEP output from a real CAD kernel (needs Dockerfile.full, below)
+#
+# ---------------------------------------------------------------------------------------
+# NO DISK ON PURPOSE.
+# Render's free tier refuses a blueprint that asks for one ("disks are not supported for
+# free tier services"). It isn't needed: the disk only ever held a SQLite index, which is
+# a cache. Every model that matters lives in Supabase and in the LEE3D-Lib repo, both of
+# which are off this box. So the index is pointed at /tmp and simply rebuilds itself after
+# a restart, and the free tier is happy. Don't add the disk back to "fix" persistence —
+# there's nothing here worth persisting.
+# ---------------------------------------------------------------------------------------
+services:
+  - type: web
+    name: lee3d-backend
+    runtime: docker
+    plan: free
+    # LIGHT image: small, builds in a couple of minutes, fits the free tier's 512MB.
+    # Gives you /health, image + PDF import, projects, and library publishing.
+    # For "Build exact" (OpenCascade -> STEP), switch this to ./Dockerfile.full — that one
+    # is multi-GB and will NOT fit the free tier. Use a paid instance, Google Cloud Run,
+    # or just run it locally with Docker; see SETUP.md.
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /health
+    envVars:
+      # /tmp is always writable and always ephemeral, which is exactly right for a cache.
+      - key: LEE3D_DATA_DIR
+        value: /tmp/lee3d
+      - key: LEE3D_GITHUB_OWNER
+        value: BEARME-A
+      - key: LEE3D_LIB_REPO
+        value: LEE3D-Lib
+      - key: LEE3D_LIB_BRANCH
+        value: main
+      # let the deployed studio call this service
+      - key: LEE3D_CORS_ORIGINS
+        value: https://bearme-a.github.io
+      # fine-grained token, LEE3D-Lib only, Contents: Read and write.
+      # sync:false = Render asks you for it in the dashboard and it never touches git.
+      - key: LEE3D_GITHUB_TOKEN
+        sync: false
