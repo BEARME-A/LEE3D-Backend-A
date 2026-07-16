@@ -23,7 +23,7 @@ import base64
 import io
 import json
 
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Query
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Query, Body
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, JSONResponse
 
@@ -81,6 +81,57 @@ def get_project(pid: int):
     if not p:
         raise HTTPException(404, "Project not found")
     return p
+
+
+# --------------------------------------------------------------------------
+# Exact build (OpenCascade) — the "make it real" pass
+# --------------------------------------------------------------------------
+@app.post("/solid")
+def solid(
+    profile: dict = Body(...),
+    fmt: str = Query("step", pattern="^(step|stl)$"),
+    hollow: bool = Query(False),
+    plan_only: bool = Query(False),
+):
+    """
+    The studio's traced outlines -> one exact solid, via OpenCascade.
+
+    The browser builds the same shape on a voxel grid, which is fast and always watertight
+    but can only ever *move* the surface it has: a window gets dished, never cut through,
+    and a corner is only as sharp as the grid. Here the outlines are extruded and
+    intersected for real, and a feature marked "through" becomes an actual hole.
+
+    Takes the profile exactly as the studio exports it — no separate schema to drift.
+    `plan_only=true` reports what the build would do without needing OpenCascade, which is
+    handy for checking the wiring on the light image.
+    """
+    from .hull import plan, export_bytes, CadUnavailable
+    try:
+        p = plan(profile)
+    except Exception as e:
+        raise HTTPException(400, f"Couldn't read that profile: {e}")
+
+    if plan_only:
+        return {
+            "dims": p["dims"],
+            "through_cuts": [f["name"] for f in p["through_cuts"]],
+            "surface_only": [f["name"] for f in p["surface_only"]],
+            "note": "surface_only features stay as dishes/bosses — the studio already does those.",
+        }
+    try:
+        data, mime, name = export_bytes(profile, fmt=fmt, hollow=hollow)
+    except CadUnavailable as e:
+        raise HTTPException(503, str(e))
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except Exception as e:
+        raise HTTPException(500, f"Exact build failed: {e}")
+
+    return StreamingResponse(
+        io.BytesIO(data), media_type=mime,
+        headers={"Content-Disposition": f'attachment; filename="{name}"',
+                 "X-LEE3D-Through-Cuts": str(len(p["through_cuts"]))},
+    )
 
 
 # --------------------------------------------------------------------------
