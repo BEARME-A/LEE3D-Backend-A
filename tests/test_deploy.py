@@ -74,12 +74,23 @@ def test_the_deployed_studio_is_allowed_to_call_it(svc):
     assert "github.io" in origins, "the Pages studio would be blocked by CORS without this"
 
 
-def test_both_images_exist_and_bind_to_the_platform_port():
+def test_the_dockerfile_it_names_is_actually_in_the_repo(svc):
+    # This is the one that bit. The blueprint said ./Dockerfile and the repo has only
+    # Dockerfile.light and Dockerfile.full, so Render failed at BUILD — before any of the
+    # app ran, with an error that says nothing about the real cause. The old version of
+    # this test skipped a missing file instead of failing on it, so it sailed through.
+    path = svc.get("dockerfilePath", "./Dockerfile")
+    f = ROOT / path.lstrip("./")
+    assert f.exists(), (
+        f"render.yaml points at {path}, which isn't in this repo. Present: "
+        + ", ".join(sorted(x.name for x in ROOT.glob("Dockerfile*")))
+    )
+
+
+def test_every_image_binds_to_the_platform_port():
     # Render sets $PORT; a container that hard-codes 8000 fails its health check and gets
     # restarted forever, which looks like a mystery rather than a config error.
-    for name in ("Dockerfile", "Dockerfile.full"):
-        f = ROOT / name
-        if not f.exists():
-            continue
-        body = f.read_text()
-        assert "PORT" in body, f"{name} must honour ${{PORT}}, not hard-code a port"
+    found = sorted(ROOT.glob("Dockerfile*"))
+    assert found, "the repo needs at least one image to deploy"
+    for f in found:
+        assert "PORT" in f.read_text(), f"{f.name} must honour ${{PORT}}, not hard-code a port"
