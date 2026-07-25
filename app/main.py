@@ -57,9 +57,32 @@ def root():
     }
 
 
+def _cad_available() -> bool:
+    """Is the CAD kernel in THIS image? Checked without importing it — OpenCascade is
+    slow and heavy to load, and the answer is only needed to report a capability."""
+    import importlib.util
+    try:
+        return importlib.util.find_spec("cadquery") is not None
+    except Exception:
+        return False
+
+
 @app.get("/health")
 def health():
-    return {"ok": True}
+    """Health, plus what this image can actually DO.
+
+    The studio used to probe /health, get {"ok": true} and report "connected" — which was
+    true and useless: the light image answers /health perfectly and cannot build a STEP.
+    So "connected" appeared and then exact build failed, with nothing linking the two.
+    Now the capabilities ride along and the studio can say which image it reached.
+    """
+    return {
+        "ok": True,
+        "version": config.APP_VERSION,
+        "cad": _cad_available(),          # False on the light image -> no exact build
+        "library_writable": storage.library_configured(),
+        "image": "full" if _cad_available() else "light",
+    }
 
 
 # --------------------------------------------------------------------------
