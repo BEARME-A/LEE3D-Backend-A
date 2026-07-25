@@ -27,10 +27,17 @@ services:
     plan: free
     # LIGHT image: small, builds in a couple of minutes, fits the free tier's 512MB.
     # Gives you /health, image + PDF import, projects, and library publishing.
-    # For "Build exact" (OpenCascade -> STEP), switch this to ./Dockerfile.full — that one
-    # is multi-GB and will NOT fit the free tier. Use a paid instance, Google Cloud Run,
-    # or just run it locally with Docker; see SETUP.md.
-    dockerfilePath: ./Dockerfile
+    #
+    # This MUST name a file that exists in the repo. It used to say ./Dockerfile, which
+    # this repo has never contained (the images are Dockerfile.light and Dockerfile.full),
+    # so a Blueprint deploy failed at build with nothing in the code to explain why.
+    #
+    # For "Build exact" (OpenCascade -> STEP) you need TWO changes, not one:
+    #     dockerfilePath: ./Dockerfile.full
+    #     plan: starter          # or larger — the full image is multi-GB
+    # Changing the path alone on a free instance will build and then die on memory.
+    # Free alternatives: Google Cloud Run, Fly.io, or Docker on your own machine.
+    dockerfilePath: ./Dockerfile.light
     healthCheckPath: /health
     envVars:
       # /tmp is always writable and always ephemeral, which is exactly right for a cache.
