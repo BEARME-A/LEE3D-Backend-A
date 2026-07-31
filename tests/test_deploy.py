@@ -94,3 +94,85 @@ def test_every_image_binds_to_the_platform_port():
     assert found, "the repo needs at least one image to deploy"
     for f in found:
         assert "PORT" in f.read_text(), f"{f.name} must honour ${{PORT}}, not hard-code a port"
+
+
+def test_the_exact_build_hollows_when_the_studio_says_hollow():
+    """The studio and the backend have to mean the same thing by "hollow".
+
+    They didn't. The planner read sepBottom — which is about whether the underside is a
+    separate printed piece — while the studio expresses hollowing with hullHollow and sends
+    sepBottom true on every frame. So the exact build came back SOLID every time, silently,
+    next to a preview that was a thin shell. For a 200mm car that is roughly a litre of
+    material instead of ninety-odd cc.
+    """
+    from app.hull import plan
+
+    base = {
+        "length": 200.0,
+        "topProfile": [[0, 80]], "bottomProfile": [[0, 0]], "widthProfile": [[0, 30]],
+        "sidePoly": [[0, 0], [1, 0], [1, 1], [0, 1]],
+        "topPoly": [[0, 0], [1, 0], [1, 1], [0, 1]],
+        "frontPoly": [[0, 0], [1, 0], [1, 1], [0, 1]],
+        "wallThickness": 6.3,
+        "sepBottom": True,          # what the studio really sends, on every frame
+    }
+
+    assert plan({**base, "hullHollow": True})["hollow"] is True, \
+        "a hollow frame must plan as hollow even with sepBottom set"
+    assert plan({**base, "hullHollow": False})["hollow"] is False, \
+        "and a solid one must not"
+    assert plan({**base, "hullHollow": True, "wallThickness": 0})["hollow"] is False, \
+        "no wall means nothing to hollow"
+
+    # profiles saved before hullHollow existed still read correctly
+    legacy = {k: v for k, v in base.items()}
+    assert plan({**legacy, "sepBottom": False})["hollow"] is True
+    assert plan({**legacy, "sepBottom": True})["hollow"] is False
+
+
+def test_the_exact_build_is_given_the_traced_shape():
+    """/solid takes the profile as a raw dict on purpose, so the traced outlines and the
+    features reach the planner. If it were ever narrowed to the older Profile model the
+    shape and every feature would be dropped without an error."""
+    from app.hull import plan
+
+    tri = [[0.1, 0.1], [0.9, 0.1], [0.5, 0.9]]
+    p = plan({
+        "length": 100.0,
+        "topProfile": [[0, 50]], "bottomProfile": [[0, 0]], "widthProfile": [[0, 20]],
+        "sidePoly": tri, "topPoly": tri, "frontPoly": tri,
+        "wallThickness": 2.0, "hullHollow": True,
+        "features": [{"view": "side", "poly": [[0.3, 0.3], [0.6, 0.3], [0.6, 0.6], [0.3, 0.6]],
+                      "depth": -3.0, "through": True, "name": "vent"}],
+    })
+    assert p["outlines"]["side"], "the traced side outline has to arrive"
+    assert p["dims"]["length"] == 100.0
+    assert [f["name"] for f in p["through_cuts"]] == ["vent"], \
+        "a cut-through feature must plan as a real hole"
+
+
+def test_the_endpoint_hollows_by_default_when_the_profile_says_so(monkeypatch):
+    """The studio sends no hollow flag, so the endpoint has to take the profile's word for
+    it. It used to default to solid, which is how a hollow frame came back as a lump."""
+    import json
+    from fastapi.testclient import TestClient
+    from app.main import app
+
+    prof = {
+        "name": "t", "length": 120.0,
+        "topProfile": [[0, 60]], "bottomProfile": [[0, 0]], "widthProfile": [[0, 25]],
+        "sidePoly": [[0, 0], [1, 0], [1, 1], [0, 1]],
+        "topPoly": [[0, 0], [1, 0], [1, 1], [0, 1]],
+        "frontPoly": [[0, 0], [1, 0], [1, 1], [0, 1]],
+        "wallThickness": 3.0, "hullHollow": True, "sepBottom": True,
+    }
+    c = TestClient(app)
+    r = c.post("/solid?plan_only=true", json=prof)
+    assert r.status_code == 200, r.text
+    assert r.json()["hollow"] is True, "no flag sent, and the profile asked for a shell"
+
+    r2 = c.post("/solid?plan_only=true&hollow=false", json=prof)
+    assert r2.json()["hollow"] is False, "an explicit flag still wins"
+
+    r3 = c.post("/solid?plan_only=true", json={**prof, "hullHollow": False})
+    assert r3.json()["hollow"] is False, "and a solid profile stays solid"
