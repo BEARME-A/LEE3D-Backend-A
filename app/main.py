@@ -113,7 +113,7 @@ def get_project(pid: int):
 def solid(
     profile: dict = Body(...),
     fmt: str = Query("step", pattern="^(step|stl)$"),
-    hollow: bool = Query(False),
+    hollow: bool | None = Query(None),
     plan_only: bool = Query(False),
 ):
     """
@@ -134,11 +134,21 @@ def solid(
     except Exception as e:
         raise HTTPException(400, f"Couldn't read that profile: {e}")
 
+    # The profile already says whether this is a shell or a lump, so an unset query flag
+    # means "do what the studio asked". It used to default to False, and since the studio
+    # never sent the flag at all, every exact build came back solid next to a hollow
+    # preview. Passing ?hollow=true/false still overrides, for anyone driving the API
+    # directly.
+    if hollow is None:
+        hollow = bool(p["hollow"])
+
     if plan_only:
         return {
             "dims": p["dims"],
             "through_cuts": [f["name"] for f in p["through_cuts"]],
             "surface_only": [f["name"] for f in p["surface_only"]],
+            "hollow": hollow,
+            "wall": p["wall"],
             "note": "surface_only features stay as dishes/bosses — the studio already does those.",
         }
     try:
