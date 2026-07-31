@@ -137,6 +137,15 @@ def feature_mm(feat: Dict[str, Any], L: float, W: float, H: float) -> Dict[str, 
     }
 
 
+def _hollow_wanted(profile: Dict[str, Any]) -> bool:
+    """Is this meant to be a shell? The studio says so with hullHollow. Older profiles only
+    carried sepBottom, where "no separate bottom piece" implied a single hollow body."""
+    want = profile.get("hullHollow")
+    if want is None:
+        want = not profile.get("sepBottom")
+    return bool(want)
+
+
 def plan(profile: Dict[str, Any]) -> Dict[str, Any]:
     """
     Everything the exact build is going to do, worked out without touching OpenCascade.
@@ -152,7 +161,15 @@ def plan(profile: Dict[str, Any]) -> Dict[str, Any]:
         "outlines": o,
         "through_cuts": cuts,
         "surface_only": skipped,      # dishes/bosses: the browser already does these
-        "hollow": bool(profile.get("sepBottom")) is False and float(profile.get("wallThickness") or 0) > 0,
+        # HOLLOW COMES FROM hullHollow, WHICH IS THE FLAG THE STUDIO ACTUALLY SETS.
+        # This used to read sepBottom, which means something else entirely — whether the
+        # underside is a separate printed piece — and the studio sends that as true on every
+        # frame. So "hollow" evaluated False every single time and an exact build came back
+        # SOLID: for a 200mm car, on the order of a litre of material against the 95cc shell
+        # in the preview beside it. Nothing errored; the two ends simply disagreed.
+        # sepBottom stays as a fallback for profiles saved before hullHollow existed, where
+        # having no separate bottom did imply one hollow body.
+        "hollow": _hollow_wanted(profile) and float(profile.get("wallThickness") or 0) > 0,
         "wall": float(profile.get("wallThickness") or 1.8),
     }
 
