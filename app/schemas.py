@@ -12,7 +12,7 @@ exported in the UI drops straight into `POST /generate`.
 """
 from __future__ import annotations
 from typing import List, Optional
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 Point = List[float]  # [x_fraction (0..1), value_in_mm]
@@ -52,13 +52,25 @@ class Profile(BaseModel):
     # Accepted for round-trip + storage; the CadQuery generator currently lofts its own
     # section, so this is forward-compatible metadata (used by the browser studio today).
     section: Optional[List[Point]] = None
+    # Cross-section cuts {at, prof:[[t,zNorm]], src} morphed along the length. This field
+    # exists in LEE3D-Lib's copy of the contract and was missing here, which is precisely
+    # the drift the docstring above says must not happen.
+    sections: Optional[list] = None
     mode: Optional[str] = None              # 'loft' | 'projection' (studio reconstruction method)
     frontHull: Optional[List[Point]] = None # absolute-mm front silhouette for projection mode
     wheels: List[Wheel] = []
     wheelLayout: Optional[WheelLayout] = None
 
-    class Config:
-        populate_by_name = True
+    # KEEP WHAT WE DON'T UNDERSTAND.
+    # pydantic's default is extra="ignore", so every field this model doesn't name was
+    # dropped on the way in: sidePoly, sidePolyR, topPoly, frontPoly, bottomPoly, features,
+    # hullCrisp, hullHollow, openUnderside, wallTop/wallSide/wallBottom, sculpt — the entire
+    # traced shape, in other words. Nothing errored; the fields simply weren't there any
+    # more. /generate then wrote that stripped object into the versions table via
+    # model_dump_json, so restoring a saved version handed back a model with no tracing in
+    # it. The studio moves faster than this file, so the contract has to carry fields it
+    # hasn't been taught yet rather than quietly delete them.
+    model_config = ConfigDict(populate_by_name=True, extra="allow")
 
 
 class GenerateOptions(BaseModel):
