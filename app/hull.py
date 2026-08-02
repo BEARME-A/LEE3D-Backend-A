@@ -118,12 +118,20 @@ def feature_mm(feat: Dict[str, Any], L: float, W: float, H: float) -> Dict[str, 
         return None                    # text/mask features stay a surface effect for now
     view = feat.get("view") or "side"
     depth = float(feat.get("depth") or 0.0)
+    # ALL SIX VIEWS ARE NAMED HERE. "sideR" used to fall through to the front/rear branch
+    # and a window traced on the right flank was cut through the nose instead — the same
+    # fall-through the studio had, and it has to be fixed on both ends or the exact build
+    # and the preview disagree about where a feature is.
     if view == "side":
         pts = [(u * L, v * H) for u, v in poly]
-    elif view == "top":
-        pts = [(u * L, v * W - W / 2.0) for u, v in poly]
-    elif view == "bottom":
-        pts = [(u * L, v * W - W / 2.0) for u, v in poly]
+    elif view == "sideR":
+        # traced standing on the far side, so its length axis mirrors — exactly the flip
+        # the studio applies to sidePolyR
+        pts = [((1.0 - u) * L, v * H) for u, v in poly]
+    elif view in ("top", "bottom"):
+        # features store v screen-up, topPoly/bottomPoly store v screen-down; without the
+        # 1- the detail lands on the opposite flank from the one it was drawn on
+        pts = [(u * L, (1.0 - v) * W - W / 2.0) for u, v in poly]
     else:                              # front / rear
         pts = [(u * W - W / 2.0, v * H) for u, v in poly]
         if view == "rear":
@@ -171,6 +179,14 @@ def plan(profile: Dict[str, Any]) -> Dict[str, Any]:
         # having no separate bottom did imply one hollow body.
         "hollow": _hollow_wanted(profile) and float(profile.get("wallThickness") or 0) > 0,
         "wall": float(profile.get("wallThickness") or 1.8),
+        # THE EXACT BUILD IS SYMMETRIC. It intersects three extruded outlines, and there is
+        # only one side outline in that set — sidePolyR is not read here at all. The studio
+        # DOES sweep between two side drawings, so on an asymmetric model the STEP and the
+        # preview are different shapes. That was true before and simply invisible; say it
+        # out loud instead, so the studio can warn rather than hand over a quietly wrong file.
+        "ignored_second_side": bool(
+            (profile.get("sidePolyR") or []) and len(profile.get("sidePolyR") or []) > 2
+        ),
     }
 
 
@@ -207,8 +223,8 @@ def build_solid(profile: Dict[str, Any], hollow: bool = False):
 
     # real holes — the thing the browser fundamentally cannot do
     for f in p["through_cuts"]:
-        plane = {"side": "XZ", "top": "XY", "bottom": "XY"}.get(f["view"], "YZ")
-        span = {"side": W, "top": H, "bottom": H}.get(f["view"], L) * 2.0
+        plane = {"side": "XZ", "sideR": "XZ", "top": "XY", "bottom": "XY"}.get(f["view"], "YZ")
+        span = {"side": W, "sideR": W, "top": H, "bottom": H}.get(f["view"], L) * 2.0
         try:
             tool = prism(plane, f["pts"], span)
             solid = solid.cut(tool)
