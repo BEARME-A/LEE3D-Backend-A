@@ -13,7 +13,11 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY app ./app
-ENV LEE3D_DATA_DIR=/data
+# /tmp, matching Dockerfile.full. This said /data, which does not exist on a host with a
+# read-only root filesystem (Cloud Run, and render.yaml names it as a free alternative) —
+# and config.py creates the dir at import, so the app died on boot rather than serving.
+# Everything in here is a cache; the models live in Supabase and LEE3D-Lib.
+ENV LEE3D_DATA_DIR=/tmp/lee3d
 EXPOSE 8000
 # bind to the platform's $PORT (Render/Railway/Fly set it); default 8000 locally
 CMD sh -c "uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000}"
