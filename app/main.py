@@ -149,6 +149,7 @@ def solid(
             "surface_only": [f["name"] for f in p["surface_only"]],
             "hollow": hollow,
             "wall": p["wall"],
+            "ignored_second_side": p["ignored_second_side"],
             "note": "surface_only features stay as dishes/bosses — the studio already does those.",
         }
     try:
@@ -163,7 +164,10 @@ def solid(
     return StreamingResponse(
         io.BytesIO(data), media_type=mime,
         headers={"Content-Disposition": f'attachment; filename="{name}"',
-                 "X-LEE3D-Through-Cuts": str(len(p["through_cuts"]))},
+                 "X-LEE3D-Through-Cuts": str(len(p["through_cuts"])),
+                 # the studio reads this and tells the user, rather than the STEP quietly
+                 # being a different shape from the preview it was built beside
+                 "X-LEE3D-Symmetric-Only": "1" if p["ignored_second_side"] else "0"},
     )
 
 
