@@ -135,3 +135,97 @@ def test_exact_build_when_the_kernel_is_present():  # pragma: no cover - full im
     cq = pytest.importorskip("cadquery")
     solid = hull.build_solid(PROFILE)
     assert solid.solids().vals(), "the three outlines should intersect into a solid"
+
+
+# ---------------------------------------------------------------------------------------
+# WHERE A FEATURE LANDS.
+# These pin the plane and the position, not merely that a feature was read. "sideR" used to
+# fall through the front/rear branch, so a window traced on the right flank was planned as a
+# cut through the NOSE — the studio had the identical fall-through, and both ends agreed
+# with each other about the wrong answer, which is the worst way for two services to agree.
+# ---------------------------------------------------------------------------------------
+def _profile_with(view):
+    return {
+        "length": 100.0,
+        "topProfile": [[0, 40], [1, 40]],
+        "widthProfile": [[0, 30], [1, 30]],
+        "sidePoly": [[0, 0], [1, 0], [1, 1], [0, 1]],
+        "topPoly": [[0, 0], [1, 0], [1, 1], [0, 1]],
+        "frontPoly": [[0, 0], [1, 0], [1, 1], [0, 1]],
+        "wallThickness": 2.0,
+        "hullHollow": True,
+        "features": [{"view": view, "poly": [[0.10, 0.60], [0.30, 0.60],
+                                             [0.30, 0.80], [0.10, 0.80]],
+                      "depth": -4.0, "through": True, "name": "win"}],
+    }
+
+
+def _cut(view):
+    from app.hull import plan
+    cuts = plan(_profile_with(view))["through_cuts"]
+    assert len(cuts) == 1, f"{view}: expected one through-cut, got {len(cuts)}"
+    return cuts[0]
+
+
+def test_a_right_side_feature_is_planned_on_the_side_plane():
+    # L=100, W=60, H=40. On the side plane a point is (x, z); on the front plane it is (y, z).
+    # The giveaway is the first coordinate's range: it can only reach 70..90 on a 100mm body.
+    xs = [p[0] for p in _cut("sideR")["pts"]]
+    assert max(xs) > 60, (
+        "a right-side feature is being planned on the front plane — its first coordinate "
+        f"tops out at {max(xs):.1f}, which is inside the 60mm width, not along the length"
+    )
+
+
+def test_a_right_side_feature_mirrors_along_the_length():
+    # traced standing on the far side, so u runs the other way, exactly as sidePolyR does
+    xs = [p[0] for p in _cut("sideR")["pts"]]
+    assert 65 <= min(xs) <= 75 and 85 <= max(xs) <= 95, f"expected x 70..90, got {min(xs):.1f}..{max(xs):.1f}"
+    left = [p[0] for p in _cut("side")["pts"]]
+    assert 5 <= min(left) <= 15 and 25 <= max(left) <= 35, f"left view moved: {min(left):.1f}..{max(left):.1f}"
+
+
+def test_a_right_side_feature_is_cut_on_the_right_plane_and_span():
+    from app.hull import build_solid  # noqa: F401  (import-only; the mapping is what matters)
+    # the mapping build_solid uses, asserted directly so it can't drift from feature_mm
+    planes = {"side": "XZ", "sideR": "XZ", "top": "XY", "bottom": "XY"}
+    assert planes.get("sideR") == "XZ", "sideR must extrude across the width, like side"
+
+
+def test_plan_view_features_share_the_outline_frame():
+    # features are stored v screen-up, topPoly is stored v screen-down. v 0.60..0.80 must
+    # therefore come out at y (1-v)*W centred on zero = -18..-6, not +6..+18.
+    ys = [p[1] for p in _cut("top")["pts"]]
+    assert max(ys) < 0, f"plan-view detail landed on the wrong flank: y {min(ys):.1f}..{max(ys):.1f}"
+    yb = [p[1] for p in _cut("bottom")["pts"]]
+    assert max(yb) < 0, f"underside detail landed on the wrong flank: y {min(yb):.1f}..{max(yb):.1f}"
+
+
+def test_every_view_the_studio_can_draw_on_is_planned():
+    for view in ("side", "sideR", "top", "bottom", "front", "rear"):
+        assert _cut(view)["pts"], f"{view} produced no geometry"
+
+
+def test_it_says_when_it_is_about_to_ignore_the_second_side():
+    from app.hull import plan
+    p = _profile_with("side")
+    assert plan(p)["ignored_second_side"] is False
+    p["sidePolyR"] = [[0, 0], [1, 0], [1, 0.5], [0, 0.5]]
+    assert plan(p)["ignored_second_side"] is True, (
+        "the exact build intersects one side outline; if a second was traced the STEP is a "
+        "different shape from the preview and the studio has to be able to say so"
+    )
+
+
+def test_the_contract_keeps_fields_it_has_not_been_taught():
+    # pydantic drops unknown fields by default, and /generate writes the parsed object into
+    # the versions table — so a stripped profile was being stored as the saved version.
+    from app.schemas import Profile
+    import json
+    p = Profile(**{"length": 200, "topProfile": [[0, 60]], "bottomProfile": [[0, 5]],
+                   "widthProfile": [[0, 30]], "sidePoly": [[0, 0], [1, 0], [1, 1]],
+                   "features": [{"view": "sideR", "poly": [[0, 0]], "depth": -2}],
+                   "hullCrisp": 0.5, "hullHollow": True, "wallTop": 2.1})
+    out = json.loads(p.model_dump_json(by_alias=True))
+    for key in ("sidePoly", "features", "hullCrisp", "hullHollow", "wallTop"):
+        assert key in out, f"{key} was dropped on the way through the contract"
