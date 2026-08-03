@@ -261,6 +261,30 @@ async def import_pdf(file: UploadFile = File(...), dpi: int = Form(150)):
         raise HTTPException(422, f"Could not read PDF: {e}")
 
 
+@app.post("/import/pdf/geometry")
+async def import_pdf_geometry(file: UploadFile = File(...), page: int = Form(0),
+                              curve_steps: int = Form(12)):
+    """The line work and the callouts, not a picture of them.
+
+    /import/pdf rasterises, which is right for showing someone a page and wrong for building
+    from one. A plotted drawing carries its geometry as real paths and its dimensions as real
+    text with real coordinates — so a site plan can be built to the numbers on it rather than
+    traced off pixels, and the height callouts can be read rather than typed. Strokes come
+    back in millimetres on the page with y reading upward, which is the frame the studio's
+    stitcher already works in.
+    """
+    from .pdf_import import extract_geometry, PdfUnavailable
+    raw = await file.read()
+    try:
+        return extract_geometry(raw, page_index=page, curve_steps=curve_steps)
+    except PdfUnavailable as e:
+        raise HTTPException(503, str(e))
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except Exception as e:
+        raise HTTPException(422, f"Could not read PDF: {e}")
+
+
 # --------------------------------------------------------------------------
 # Library
 # --------------------------------------------------------------------------
