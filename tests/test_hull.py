@@ -63,12 +63,27 @@ def test_a_missing_outline_becomes_a_plain_box_rather_than_an_error():
     assert len(o["side"]) == 4 and len(o["top"]) == 4 and len(o["front"]) == 4
 
 
-def test_only_through_features_become_real_cuts():
+def test_every_feature_with_depth_is_built_as_real_geometry():
+    """REWRITTEN. This used to assert that anything not a through-cut was surface_only, with
+    the reasoning that the browser handled dishes and bosses as surface effects. That stopped
+    being true when the studio moved its detail work into the distance field: a pocket became
+    real geometry cut to an exact depth. The two ends then disagreed in silence — on the
+    project's own reference car, 0 of 153 features reached the STEP and the export looked like
+    a smooth body with no error raised.
+    OpenCascade cuts a finite-depth pocket directly, so there was never a reason to skip them.
+    What genuinely has no solid meaning is a feature with NO depth: a mask or a text label."""
     p = hull.plan(PROFILE)
     assert [f["name"] for f in p["through_cuts"]] == ["window"]
-    # a raised mirror is a surface effect, and text has no outline to extrude
-    assert "mirror" in [f["name"] for f in p["surface_only"]]
+    # a raised mirror is a boss now, not a surface effect
+    assert "mirror" in [f["name"] for f in p["raises"]]
+    assert "mirror" not in [f["name"] for f in p["surface_only"]]
+    # a positive depth must never become a hole
     assert "badge" not in [f["name"] for f in p["through_cuts"]]
+    # nothing with a depth may be silently dropped
+    named = {f["name"] for f in p["through_cuts"] + p["pockets"] + p["raises"]}
+    for f in PROFILE["features"]:
+        if f.get("depth") and f.get("poly"):
+            assert f["name"] in named, f"{f['name']!r} has a depth and must be built"
 
 
 def test_a_positive_depth_never_becomes_a_hole():
@@ -229,3 +244,70 @@ def test_the_contract_keeps_fields_it_has_not_been_taught():
     out = json.loads(p.model_dump_json(by_alias=True))
     for key in ("sidePoly", "features", "hullCrisp", "hullHollow", "wallTop"):
         assert key in out, f"{key} was dropped on the way through the contract"
+
+
+def test_a_pocket_enters_from_the_face_it_was_drawn_on():
+    """Which END of an axis a feature starts from decides where a finite-depth pocket puts its
+    floor. On a through-cut it does not matter — the cut goes all the way either way — so this
+    only began to matter when pockets became real. Getting it wrong puts the detail on the
+    opposite face, which is the same class of bug as sideR once being cut through the nose."""
+    prof = dict(PROFILE)
+    square = [[0.3, 0.3], [0.6, 0.3], [0.6, 0.6], [0.3, 0.6]]
+    prof["features"] = [
+        {"kind": "poly", "view": "side", "name": "left", "depth": -3, "poly": square},
+        {"kind": "poly", "view": "sideR", "name": "right", "depth": -3, "poly": square},
+        {"kind": "poly", "view": "top", "name": "roof", "depth": -3, "poly": square},
+        {"kind": "poly", "view": "bottom", "name": "floor", "depth": -3, "poly": square},
+    ]
+    p = hull.plan(prof)
+    assert len(p["pockets"]) == 4, "all four must be built, none skipped"
+    assert p["through_cuts"] == [], "none of them was marked through"
+    # opposite views must not resolve to the same footprint, or they are the same pocket twice
+    by = {f["name"]: f["pts"] for f in p["pockets"]}
+    assert by["left"] != by["right"], "side and sideR must mirror along the length"
+
+
+def test_a_feature_with_no_depth_has_no_solid_meaning():
+    """Masks and text labels carry no depth. They are the only things the exact build can
+    honestly skip, and it must say so rather than quietly dropping anything else."""
+    prof = dict(PROFILE)
+    prof["features"] = [
+        {"kind": "poly", "view": "side", "name": "mask", "depth": 0,
+         "poly": [[0.3, 0.3], [0.6, 0.3], [0.6, 0.6], [0.3, 0.6]]},
+        {"kind": "poly", "view": "side", "name": "dish", "depth": -2,
+         "poly": [[0.1, 0.1], [0.2, 0.1], [0.2, 0.2], [0.1, 0.2]]},
+    ]
+    p = hull.plan(prof)
+    assert [f["name"] for f in p["surface_only"]] == ["mask"]
+    assert [f["name"] for f in p["pockets"]] == ["dish"]
+
+
+def test_a_degenerate_outline_is_dropped_by_both_ends():
+    """A three-point polygon whose first and last points are the same is a LINE, not a
+    triangle. It carves nothing, so dropping it is right — but it is worth pinning, because
+    the studio counts such a feature and this end does not, and an unexplained 153-vs-152
+    is exactly the kind of discrepancy that hides a real one."""
+    prof = dict(PROFILE)
+    prof["features"] = [{"kind": "poly", "view": "side", "name": "sliver", "depth": -2,
+                         "poly": [[0.2, 0.4], [0.7, 0.4], [0.2, 0.4]]}]
+    p = hull.plan(prof)
+    assert p["pockets"] == [] and p["through_cuts"] == []
+
+
+def test_extra_views_are_reported_because_this_build_cannot_use_them():
+    """The studio can carve from silhouettes at any angle — the groundwork for building from
+    photographs. This build intersects the three axis outlines only, so a model using extra
+    views comes out FATTER here: every extra view removes material and the ones we cannot use
+    remove none. That difference has to be loud. A quiet one is what let 153 pockets go
+    missing from a STEP for weeks."""
+    prof = dict(PROFILE)
+    prof["extraViews"] = [
+        {"dir": [0, 1, 1], "poly": [[0, 0], [10, 0], [10, 10], [0, 10]]},
+        {"dir": [1, 0, 1], "poly": [[0, 0], [10, 0], [10, 10], [0, 10]]},
+        {"dir": [1, 1, 0], "poly": None},          # malformed: must not be counted
+    ]
+    p = hull.plan(prof)
+    assert p["unusable_views"] == 2, "usable-looking extra views must be counted and reported"
+    prof2 = dict(PROFILE)
+    p2 = hull.plan(prof2)
+    assert p2["unusable_views"] == 0, "a model with no extra views must not raise the alarm"
