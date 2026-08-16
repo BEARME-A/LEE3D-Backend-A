@@ -162,13 +162,37 @@ def plan(profile: Dict[str, Any]) -> Dict[str, Any]:
     L, W, H = dims(profile)
     o = outlines_mm(profile)
     feats = [f for f in (feature_mm(x, L, W, H) for x in (profile.get("features") or [])) if f]
+    # WHAT THE EXACT BUILD DOES WITH EACH FEATURE.
+    # This used to be two buckets: through-cuts, and "surface_only — the browser already does
+    # these". That second comment stopped being true when the studio moved its detail work into
+    # the distance field: a pocket is now REAL GEOMETRY cut to an exact depth, not a dish
+    # pressed into a surface. The two ends silently disagreed, and on the project's own
+    # reference car that meant 0 of 153 features made it into the STEP — an export that looked
+    # like a smooth body and raised no error. Same shape as the sepBottom/hullHollow bug below.
+    # OpenCascade cuts a finite-depth pocket directly, so there is no reason to skip them.
     cuts = [f for f in feats if f["through"] and f["depth"] < 0]
-    skipped = [f for f in feats if not (f["through"] and f["depth"] < 0)]
+    pockets = [f for f in feats if not f["through"] and f["depth"] < 0]
+    raises = [f for f in feats if not f["through"] and f["depth"] > 0]
+    # A feature with no depth is a mask or a text label: a surface effect with no solid meaning.
+    surface = [f for f in feats if f["depth"] == 0.0]
+    # OUTLINES THIS BUILD CANNOT USE.
+    # The studio can now carve from silhouettes at ANY angle (p.extraViews), which is the
+    # groundwork for building from photographs — several views of an object, each one saying
+    # where the object cannot be. This build intersects the three axis outlines only, so a
+    # model that uses extra views would come out FATTER here than in the preview: every extra
+    # view removes material, and the ones we cannot use remove none.
+    # It is reported rather than ignored. That is the whole lesson of the pockets: a quiet
+    # difference between the two ends is worse than a loud limitation.
+    extra = [v for v in (profile.get("extraViews") or [])
+             if isinstance(v, dict) and _clean(v.get("poly"))]
     return {
         "dims": {"length": L, "width": W, "height": H},
         "outlines": o,
+        "unusable_views": len(extra),
         "through_cuts": cuts,
-        "surface_only": skipped,      # dishes/bosses: the browser already does these
+        "pockets": pockets,
+        "raises": raises,
+        "surface_only": surface,      # masks and labels: genuinely nothing to build
         # HOLLOW COMES FROM hullHollow, WHICH IS THE FLAG THE STUDIO ACTUALLY SETS.
         # This used to read sepBottom, which means something else entirely — whether the
         # underside is a separate printed piece — and the studio sends that as true on every
@@ -221,15 +245,107 @@ def build_solid(profile: Dict[str, Any], hollow: bool = False):
             "object, facing the way the studio expects (length left-to-right on side/top)."
         )
 
+    # WHICH WAY A FEATURE GOES IN.
+    # A feature is drawn on one face and travels straight in along the axis that face looks
+    # down. Which END of that axis it starts from decides where a finite-depth pocket puts its
+    # floor, so it has to be right per view — side enters from -y and sideR from +y, top from
+    # +z and bottom from -z, front from +x and rear from -x. Getting this wrong on a through
+    # cut is invisible (it goes all the way through either way); on a pocket it puts the
+    # detail on the opposite face.
+    PLANE = {"side": "XZ", "sideR": "XZ", "top": "XY", "bottom": "XY"}
+    SPAN = {"side": W, "sideR": W, "top": H, "bottom": H}
+    NEAR_MAX = {"side": False, "sideR": True, "top": True, "bottom": False,
+                "front": True, "rear": False}
+
+    def extent(view: str):
+        """(axis index, low, high) of the body along the axis this view looks down."""
+        if view in ("side", "sideR"):
+            return 1, -W / 2.0, W / 2.0
+        if view in ("top", "bottom"):
+            return 2, 0.0, H
+        return 0, 0.0, L
+
     # real holes — the thing the browser fundamentally cannot do
     for f in p["through_cuts"]:
-        plane = {"side": "XZ", "sideR": "XZ", "top": "XY", "bottom": "XY"}.get(f["view"], "YZ")
-        span = {"side": W, "sideR": W, "top": H, "bottom": H}.get(f["view"], L) * 2.0
+        plane = PLANE.get(f["view"], "YZ")
+        span = SPAN.get(f["view"], L) * 2.0
         try:
             tool = prism(plane, f["pts"], span)
             solid = solid.cut(tool)
         except Exception as e:                     # one bad outline shouldn't lose the model
             print(f"[hull] skipped through-cut {f['name']!r}: {e!r}")
+
+    # FINITE-DEPTH POCKETS AND RAISES — the part that was missing.
+    # The studio cuts these into its distance field, so they are real geometry there and have
+    # to be real geometry here or the STEP does not match what someone approved on screen.
+    # OpenCascade does it exactly: build the prism, keep only the slab within `depth` of the
+    # face it enters from, and cut (or fuse) that. No grid, so no minimum feature size and no
+    # knife edge — this path should be BETTER than the browser, not absent.
+    # ONE BOOLEAN, NOT A HUNDRED AND FIFTY.
+    # Each cut() is a full CSG operation, and a real car carries 150+ pockets — done one at a
+    # time that is 150 rebuilds of the whole solid, each one more expensive than the last as
+    # the shape gets more complicated. Building all the pocket tools first, fusing them into
+    # one compound and cutting ONCE is the same result for a fraction of the work. Raises are
+    # fused the same way. Anything that fails to build is still reported individually, so a
+    # single bad outline cannot take the model with it.
+    pocket_tools, raise_tools = [], []
+    for f in p["pockets"] + p["raises"]:
+        view = f["view"]
+        plane = PLANE.get(view, "YZ")
+        span = SPAN.get(view, L) * 2.0
+        depth = abs(f["depth"])
+        is_raise = f["depth"] > 0
+        try:
+            tool = prism(plane, f["pts"], span)
+            axis, lo, hi = extent(view)
+            near_max = NEAR_MAX.get(view, True)
+            # The slab the feature occupies, measured from the face it enters. A raise stands
+            # OUTSIDE that face, so its slab sits beyond it.
+            if near_max:
+                a, b = (hi, hi + depth) if is_raise else (hi - depth, hi)
+            else:
+                a, b = (lo - depth, lo) if is_raise else (lo, lo + depth)
+            pad = max(L, W, H)
+            box_lo = [-pad, -pad, -pad]
+            box_hi = [L + pad, pad, H + pad]
+            box_lo[axis], box_hi[axis] = a, b
+            slab = cq.Workplane("XY").box(
+                box_hi[0] - box_lo[0], box_hi[1] - box_lo[1], box_hi[2] - box_lo[2],
+                centered=False).translate((box_lo[0], box_lo[1], box_lo[2]))
+            shaped = tool.intersect(slab)
+            if not shaped.solids().vals():
+                continue                           # the slab missed the body: nothing to do
+            (raise_tools if is_raise else pocket_tools).append(shaped)
+        except Exception as e:
+            kind = "raise" if is_raise else "pocket"
+            print(f"[hull] skipped {kind} {f['name']!r}: {e!r}")
+
+    def combine(tools):
+        """Fuse a list of tool solids into one. Pairwise, because a failure in the middle of a
+        long fuse should cost that one tool and not the whole batch."""
+        out = None
+        for t in tools:
+            if out is None:
+                out = t
+                continue
+            try:
+                out = out.union(t)
+            except Exception as e:
+                print(f"[hull] a tool would not fuse, skipping it: {e!r}")
+        return out
+
+    cutter = combine(pocket_tools)
+    if cutter is not None:
+        try:
+            solid = solid.cut(cutter)
+        except Exception as e:
+            print(f"[hull] pockets would not cut ({e!r}); leaving them out")
+    adder = combine(raise_tools)
+    if adder is not None:
+        try:
+            solid = solid.union(adder)
+        except Exception as e:
+            print(f"[hull] raises would not fuse ({e!r}); leaving them out")
 
     if hollow and p["wall"] > 0:
         try:
