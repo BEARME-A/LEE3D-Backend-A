@@ -143,14 +143,36 @@ def solid(
         hollow = bool(p["hollow"])
 
     if plan_only:
+        # SAY WHAT WILL ACTUALLY BE BUILT, feature by feature. This used to report two buckets
+        # and a note claiming the skipped ones were "dishes/bosses the studio already does" —
+        # which stopped being true when the studio started cutting them as real geometry, and
+        # left someone able to download a STEP with none of their detail in it and no warning.
+        built = len(p["through_cuts"]) + len(p["pockets"]) + len(p["raises"])
         return {
             "dims": p["dims"],
             "through_cuts": [f["name"] for f in p["through_cuts"]],
+            "pockets": [f["name"] for f in p["pockets"]],
+            "raises": [f["name"] for f in p["raises"]],
             "surface_only": [f["name"] for f in p["surface_only"]],
+            "features_built": built,
+            "features_skipped": len(p["surface_only"]),
+            # the studio can carve from silhouettes at any angle; this build intersects the
+            # three axis outlines only, so it would come out FATTER. Say so.
+            "unusable_views": p["unusable_views"],
             "hollow": hollow,
             "wall": p["wall"],
             "ignored_second_side": p["ignored_second_side"],
-            "note": "surface_only features stay as dishes/bosses — the studio already does those.",
+            "note": (
+                "Cuts, pockets and raises are all built as real geometry. "
+                "surface_only covers masks and text labels, which have no solid meaning."
+                if not p["surface_only"] and not p["unusable_views"] else
+                f"This model carves from {p['unusable_views']} extra view(s) that the exact "
+                "build cannot use — it intersects the three axis outlines only, so the result "
+                "will be FATTER than the preview. Everything else is built."
+                if p["unusable_views"] else
+                f"{len(p['surface_only'])} feature(s) are masks or labels with no depth, so they "
+                "have no solid meaning and are not in the exact build. Everything else is."
+            ),
         }
     try:
         data, mime, name = export_bytes(profile, fmt=fmt, hollow=hollow)
@@ -165,6 +187,12 @@ def solid(
         io.BytesIO(data), media_type=mime,
         headers={"Content-Disposition": f'attachment; filename="{name}"',
                  "X-LEE3D-Through-Cuts": str(len(p["through_cuts"])),
+                 # so the studio can say "this STEP has your 153 pockets in it" — or, if it
+                 # ever cannot build something, say THAT instead of shipping it silently
+                 "X-LEE3D-Pockets": str(len(p["pockets"])),
+                 "X-LEE3D-Raises": str(len(p["raises"])),
+                 "X-LEE3D-Skipped": str(len(p["surface_only"])),
+                 "X-LEE3D-Unusable-Views": str(p["unusable_views"]),
                  # the studio reads this and tells the user, rather than the STEP quietly
                  # being a different shape from the preview it was built beside
                  "X-LEE3D-Symmetric-Only": "1" if p["ignored_second_side"] else "0"},
