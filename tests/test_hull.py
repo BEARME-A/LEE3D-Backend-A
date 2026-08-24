@@ -311,3 +311,80 @@ def test_extra_views_are_reported_because_this_build_cannot_use_them():
     prof2 = dict(PROFILE)
     p2 = hull.plan(prof2)
     assert p2["unusable_views"] == 0, "a model with no extra views must not raise the alarm"
+
+
+# ---------------------------------------------------------------------------------------
+# PER-FACE WALL THICKNESS. The polygon maths is here in plain Python precisely so it can be
+# tested without a CAD kernel — it is the part that can be got wrong. Everything OpenCascade
+# touches is kept trivial on purpose.
+# ---------------------------------------------------------------------------------------
+def test_a_uniform_wall_still_takes_the_plain_path():
+    """The guard that makes this free for everyone else: three equal values must not switch on
+    the cavity build. profile_7 and every model like it keeps the shell() it always had."""
+    assert not hull.wall_varies(hull.wall_spec({"wallThickness": 4.2}))
+    assert not hull.wall_varies(hull.wall_spec(
+        {"wallThickness": 4.2, "wallTop": 4.2, "wallSide": 4.2, "wallBottom": 4.2}))
+    assert hull.wall_varies(hull.wall_spec(
+        {"wallThickness": 4.2, "wallTop": 4.2, "wallSide": 4.2, "wallBottom": 12.0}))
+
+
+def test_an_outline_normal_says_which_face_it_makes():
+    """Collin's `ax, ay, az`: which axes a normal occupies is what turns a 2D outline into 3D
+    face information. On a side view, up is the roof, down is the floor, and along the length
+    is a nose or tail — which counts as a flank."""
+    spec = hull.wall_spec({"wallThickness": 6, "wallTop": 6, "wallSide": 6, "wallBottom": 16})
+    assert hull.wall_for_normal(hull.lift_normal((0, 1), "XZ"), spec) == 6      # roof
+    assert hull.wall_for_normal(hull.lift_normal((0, -1), "XZ"), spec) == 16    # floor
+    assert hull.wall_for_normal(hull.lift_normal((1, 0), "XZ"), spec) == 6      # nose: a flank
+    # a plan view can only ever make flanks, whatever its normal does
+    assert hull.wall_for_normal(hull.lift_normal((0, 1), "XY"), spec) == 6
+    assert hull.wall_for_normal(hull.lift_normal((1, 0), "XY"), spec) == 6
+    # and a 45-degree stretch blends rather than switching, so a corner has no seam
+    blended = hull.wall_for_normal(hull.lift_normal((0.7071, -0.7071), "XZ"), spec)
+    assert 6 < blended < 16, f"a sloped surface should blend, got {blended}"
+
+
+def test_each_edge_moves_in_by_its_own_wall():
+    """The heart of it. A 100x60 side outline with a 16mm floor and 6mm elsewhere must come
+    back with its bottom edge raised 16 and everything else moved 6."""
+    spec = hull.wall_spec({"wallThickness": 6, "wallTop": 6, "wallSide": 6, "wallBottom": 16})
+    out = hull.offset_inward([(0, 0), (100, 0), (100, 60), (0, 60)], "XZ", spec)
+    xs = sorted({round(x, 3) for x, _ in out})
+    zs = sorted({round(z, 3) for _, z in out})
+    assert xs == [6.0, 94.0], f"sides should move in 6mm, got {xs}"
+    assert zs == [16.0, 54.0], f"floor should rise 16 and roof drop 6, got {zs}"
+
+
+def test_the_wall_is_chosen_by_the_surface_normal_not_the_direction_of_travel():
+    """The sign trap, and it is worth a test of its own because getting it backwards silently
+    swaps a thick floor for a thick roof — which is exactly the mistake this feature exists to
+    prevent. An edge along the bottom moves UP to make the cavity, but the surface it creates
+    faces DOWN and is the floor."""
+    spec = hull.wall_spec({"wallThickness": 6, "wallTop": 6, "wallSide": 6, "wallBottom": 16})
+    out = hull.offset_inward([(0, 0), (100, 0), (100, 60), (0, 60)], "XZ", spec)
+    bottom = min(z for _, z in out)
+    top = max(z for _, z in out)
+    assert abs(bottom - 16.0) < 1e-6, f"the THICK value belongs to the floor, got {bottom}"
+    assert abs((60 - top) - 6.0) < 1e-6, f"the thin value belongs to the roof, got {60 - top}"
+
+
+def test_offsetting_a_wound_outline_either_way_gives_the_same_cavity():
+    """Winding is not something a traced outline can be trusted to have consistently, and
+    inward has to mean inward regardless. `poly_area()` is abs()-ed, so it cannot tell the two
+    apart — using it here made a clockwise outline offset OUTWARD."""
+    spec = hull.wall_spec({"wallThickness": 5})
+    ccw = [(0, 0), (100, 0), (100, 60), (0, 60)]
+    a = hull.offset_inward(ccw, "XZ", spec)
+    b = hull.offset_inward(list(reversed(ccw)), "XZ", spec)
+    assert sorted(round(x, 3) for x, _ in a) == sorted(round(x, 3) for x, _ in b)
+    assert min(x for x, _ in a) > 0 and max(x for x, _ in a) < 100, "it must move INWARD"
+
+
+def test_a_degenerate_outline_does_not_explode():
+    """Repeated points and near-parallel edges are normal in traced data. A wrong corner is
+    survivable; a coordinate at 1e17 is not."""
+    spec = hull.wall_spec({"wallThickness": 3})
+    out = hull.offset_inward([(0, 0), (0, 0), (50, 0), (50, 40), (0, 40)], "XZ", spec)
+    assert len(out) == 5
+    for x, y in out:
+        assert abs(x) < 1e6 and abs(y) < 1e6, f"runaway corner at {(x, y)}"
