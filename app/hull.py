@@ -23,6 +23,7 @@ else without it, and asks for the full image only when someone actually wants ex
 """
 from __future__ import annotations
 
+import math
 from typing import Any, Dict, List, Sequence, Tuple
 
 
@@ -70,6 +71,137 @@ def _clean(poly: Sequence[Sequence[float]] | None) -> List[Pt] | None:
     while len(out) > 1 and abs(out[0][0] - out[-1][0]) < 1e-9 and abs(out[0][1] - out[-1][1]) < 1e-9:
         out.pop()                     # the extruder closes it for us
     return out if len(out) >= 3 else None
+
+
+# =======================================================================================
+# PER-FACE WALL THICKNESS — roof, sides and floor can differ.
+#
+# The studio lets someone set a thick floor to bolt through with thin walls elsewhere, and the
+# exact build shelled with one number, so a per-face model exported uniform. `solid.shell()`
+# cannot vary its thickness, so the cavity has to be built rather than offset.
+#
+# Which is the carving principle again, one level in: the body is the intersection of three
+# extruded outlines, so the CAVITY is the intersection of those same outlines each pulled
+# inward by the wall belonging to the surface it creates. Cut one from the other and the shell
+# is whatever is between them.
+#
+# Collin's framing, and it is the right one: label every outline point by which axis it faces.
+# A point on the side outline whose normal points up is ROOF; the same outline's normal
+# pointing along the length is a nose or tail, which counts as SIDE. That classification is
+# all `wall_for_normal` needs, and it is what makes a 2D outline carry 3D face information.
+#
+# The polygon maths lives here, in plain Python, because it is the part that can be got wrong
+# and the part that can be tested without a CAD kernel. Everything OpenCascade touches is kept
+# trivial on purpose.
+# =======================================================================================
+
+def wall_spec(profile: dict) -> dict:
+    """Roof / side / floor thickness, each falling back to the single wall. Mirrors
+    `wallSpec()` in the studio exactly, so the two ends cannot drift apart on the defaults."""
+    base = max(0.2, float(profile.get("wallThickness") or 1.8))
+    return {
+        "top": max(0.2, float(profile.get("wallTop") or base)),
+        "side": max(0.2, float(profile.get("wallSide") or base)),
+        "bot": max(0.2, float(profile.get("wallBottom") or base)),
+        "base": base,
+    }
+
+
+def wall_varies(spec: dict) -> bool:
+    """True only when the three faces actually differ. A uniform model must take the plain
+    shell path it always did — this is what keeps the change free for everyone else."""
+    return (abs(spec["top"] - spec["side"]) > 1e-6
+            or abs(spec["bot"] - spec["side"]) > 1e-6
+            or abs(spec["top"] - spec["bot"]) > 1e-6)
+
+
+def wall_for_normal(n3: Sequence[float], spec: dict) -> float:
+    """Blend roof/side/floor by how much a normal points up, sideways and down.
+    Same formula as `wallAt()` in the studio: weighted, not switched, so the thickness turns
+    smoothly through a corner instead of stepping and leaving a seam."""
+    up = max(0.0, n3[2])
+    down = max(0.0, -n3[2])
+    side = math.hypot(n3[0], n3[1])
+    total = up + down + side
+    if total < 1e-9:
+        return spec["base"]
+    return (spec["top"] * up + spec["bot"] * down + spec["side"] * side) / total
+
+
+def lift_normal(n2: Sequence[float], plane: str) -> Tuple[float, float, float]:
+    """Put a 2D outline normal back into 3D. This is the `ax, ay, az` step: an outline is drawn
+    on one plane, and which axes its normal occupies is what says whether that stretch of it is
+    roof, floor or flank.
+        XZ (the side view)   -> (nx, 0, nz)   can be roof, floor, nose or tail
+        XY (the plan view)   -> (nx, ny, 0)   always a flank
+        YZ (the front view)  -> (0, ny, nz)   can be roof, floor or flank
+    """
+    a, b = float(n2[0]), float(n2[1])
+    if plane == "XZ":
+        return (a, 0.0, b)
+    if plane == "XY":
+        return (a, b, 0.0)
+    return (0.0, a, b)
+
+
+def offset_inward(poly: Sequence[Pt], plane: str, spec: dict) -> List[Pt]:
+    """Pull a closed outline inward, by a different amount along each stretch of it.
+
+    Each edge moves in along its own inward normal by the wall belonging to that edge's
+    direction. The new corners are where consecutive offset edges meet — solved as a line
+    intersection, so a corner stays a corner instead of being rounded or clipped.
+
+    Where two offset edges are nearly parallel their intersection runs away to infinity, so
+    that corner falls back to the plain offset point. Rare, and a wrong corner is better than
+    a coordinate at 1e17.
+    """
+    n = len(poly)
+    if n < 3:
+        return list(poly)
+    # WHICH WAY IS IN. `poly_area()` returns a magnitude — it is abs()-ed, because every other
+    # caller wants a size — so it cannot tell the two windings apart. Using it here made a
+    # clockwise outline offset OUTWARD, which on a traced file is a coin flip: nothing
+    # guarantees the winding of an outline somebody drew. Compute the SIGNED area locally.
+    signed = 0.0
+    for i in range(n):
+        x1, y1 = poly[i - 1]
+        x2, y2 = poly[i]
+        signed += x1 * y2 - x2 * y1
+    ccw = signed > 0
+    lines = []
+    for i in range(n):
+        x1, y1 = poly[i]
+        x2, y2 = poly[(i + 1) % n]
+        ex, ey = x2 - x1, y2 - y1
+        length = math.hypot(ex, ey)
+        if length < 1e-12:
+            lines.append(None)
+            continue
+        # Inward normal — the direction this edge has to move to make the cavity.
+        nx, ny = (-ey / length, ex / length) if ccw else (ey / length, -ex / length)
+        # ...but the wall is chosen by the SURFACE normal, which points the other way. An edge
+        # along the bottom of a side view has an inward normal pointing UP, and lifting that
+        # straight into 3D reads as roof — while the surface it makes faces DOWN and is the
+        # floor. Getting this backwards silently swaps a thick floor for a thick roof, which is
+        # exactly the mistake this whole feature exists to prevent.
+        w = wall_for_normal(lift_normal((-nx, -ny), plane), spec)
+        lines.append((x1 + nx * w, y1 + ny * w, ex / length, ey / length))
+    out: List[Pt] = []
+    for i in range(n):
+        a = lines[i - 1]
+        b = lines[i]
+        if a is None or b is None:
+            out.append(poly[i])
+            continue
+        ax, ay, adx, ady = a
+        bx, by, bdx, bdy = b
+        den = adx * bdy - ady * bdx
+        if abs(den) < 1e-9:                       # parallel: no corner to solve
+            out.append((bx, by))
+            continue
+        t = ((bx - ax) * bdy - (by - ay) * bdx) / den
+        out.append((ax + adx * t, ay + ady * t))
+    return out
 
 
 def poly_area(poly: Sequence[Pt]) -> float:
@@ -203,6 +335,8 @@ def plan(profile: Dict[str, Any]) -> Dict[str, Any]:
         # having no separate bottom did imply one hollow body.
         "hollow": _hollow_wanted(profile) and float(profile.get("wallThickness") or 0) > 0,
         "wall": float(profile.get("wallThickness") or 1.8),
+        "wall_spec": wall_spec(profile),          # roof/side/floor, for the per-face cavity
+        "wall_varies": wall_varies(wall_spec(profile)),
         # THE EXACT BUILD IS SYMMETRIC. It intersects three extruded outlines, and there is
         # only one side outline in that set — sidePolyR is not read here at all. The studio
         # DOES sweep between two side drawings, so on an asymmetric model the STEP and the
@@ -348,10 +482,36 @@ def build_solid(profile: Dict[str, Any], hollow: bool = False):
             print(f"[hull] raises would not fuse ({e!r}); leaving them out")
 
     if hollow and p["wall"] > 0:
-        try:
-            solid = solid.shell(-abs(p["wall"]))   # negative = inward, keeps outside size
-        except Exception as e:
-            print(f"[hull] could not hollow it ({e!r}); returning it solid")
+        spec = p["wall_spec"]
+        if wall_varies(spec):
+            # PER-FACE: build the cavity and cut it, because shell() cannot vary its thickness.
+            # The cavity is the same intersection the body is, with each outline pulled inward
+            # by the wall belonging to the surfaces it creates. If any part of it fails, fall
+            # through to the uniform shell rather than hand back a solid lump.
+            try:
+                o = p["outlines"]
+                inner = None
+                for key, plane, span in (("side", "XZ", W), ("top", "XY", H), ("front", "YZ", L)):
+                    poly = o.get(key)
+                    if not poly:
+                        continue
+                    piece = prism(plane, offset_inward(poly, plane, spec), span * 2.0)
+                    inner = piece if inner is None else inner.intersect(piece)
+                if inner is not None and inner.solids().vals():
+                    solid = solid.cut(inner)
+                else:
+                    raise ValueError("the cavity came out empty")
+            except Exception as e:
+                print(f"[hull] per-face hollow failed ({e!r}); falling back to a uniform wall")
+                try:
+                    solid = solid.shell(-abs(min(spec["top"], spec["side"], spec["bot"])))
+                except Exception as e2:
+                    print(f"[hull] could not hollow it ({e2!r}); returning it solid")
+        else:
+            try:
+                solid = solid.shell(-abs(p["wall"]))   # negative = inward, keeps outside size
+            except Exception as e:
+                print(f"[hull] could not hollow it ({e!r}); returning it solid")
     return solid
 
 
