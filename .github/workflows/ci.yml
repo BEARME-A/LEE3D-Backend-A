@@ -28,3 +28,40 @@ jobs:
 
       - name: Run tests (storage + schema full; CAD self-skips)
         run: pytest -q
+
+  # THE CAD KERNEL, in its own job so it cannot slow or break the gate above.
+  #
+  # The comment at the top of this file — and the note in requirements.txt — said cadquery was
+  # not pip-reliable and had to come from conda, so the kernel tests were left to run locally.
+  # In practice they ran NOWHERE: the skip guard was inverted and skipped unless cadquery had
+  # already been imported, which in a fresh pytest run is never. Four tests written to catch a
+  # wrong pocket sat dormant, and `build_solid()` was quietly returning a solid block to every
+  # one of them.
+  #
+  # `pip install cadquery` works now (2.8.0, Linux, Python 3.11+) and takes a couple of minutes.
+  # That is worth paying for on a separate job: this is the only place the exact build's actual
+  # GEOMETRY is ever checked, as opposed to its plan.
+  cad:
+    runs-on: ubuntu-latest
+    # never blocks a merge on a heavy dependency that may break on a platform we do not control
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+
+      - name: Install with the CAD kernel
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt pytest cadquery
+
+      - name: Confirm the kernel is really there
+        # a silent absence would turn every test below into a skip and look like a pass
+        run: python -c "import cadquery; print('cadquery', cadquery.__version__)"
+
+      - name: Build real geometry
+        # ~5 minutes: OpenCascade is doing the work now rather than being skipped
+        run: pytest -q -rs
