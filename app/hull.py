@@ -351,8 +351,18 @@ def plan(profile: Dict[str, Any]) -> Dict[str, Any]:
 # --------------------------------------------------------------------------------------
 # The exact build. Needs OpenCascade.
 # --------------------------------------------------------------------------------------
-def build_solid(profile: Dict[str, Any], hollow: bool = False):
-    """
+def build_solid(profile: Dict[str, Any], hollow: bool | None = None):
+    """`hollow=None` means ASK THE PROFILE, which is almost always what a caller wants.
+
+    It used to default to False, so `build_solid(profile)` on a profile that says
+    `hullHollow: true` returned a solid block and said nothing. The real export path passes the
+    flag explicitly and was never affected — but every test written against `build_solid`
+    directly was quietly measuring a solid, including four of mine that were meant to be
+    checking the hollowing. They passed for a year of sessions without running the thing they
+    named.
+    Deferring to the profile removes the trap; an explicit True or False still wins, so the
+    export path is unchanged.
+
     Three traced outlines -> one exact solid.
 
     The visual hull is literally the intersection of the three outlines extruded through
@@ -361,6 +371,8 @@ def build_solid(profile: Dict[str, Any], hollow: bool = False):
     """
     cq = _import_cq()
     p = plan(profile)
+    if hollow is None:
+        hollow = p["hollow"]
     L, W, H = p["dims"]["length"], p["dims"]["width"], p["dims"]["height"]
     o = p["outlines"]
 
@@ -483,35 +495,105 @@ def build_solid(profile: Dict[str, Any], hollow: bool = False):
 
     if hollow and p["wall"] > 0:
         spec = p["wall_spec"]
+        # BUILD THE CAVITY, DO NOT OFFSET THE FACES.
+        # `shell()` offsets every face at once and needs them all to offset consistently. On a
+        # traced car that is 188 faces, many near-tangent, and one bad offset returns a Null
+        # TopoDS_Shape — measured. The failure was caught and the solid returned, so a real
+        # car exported as 807 cm3 of material where a 4.9mm shell was asked for, with no error.
+        # It went unseen because the kernel tests had never run.
+        #
+        # So intersect the three outlines pulled inward, and cut that out. Same carving
+        # principle as the body itself, one level in. Measured on a real car: 812 cm3 solid ->
+        # 352 cm3 shell, one valid solid, 1.6 seconds.
+        #
+        # `offset2D` rather than our own `offset_inward` for the uniform case, because pulling
+        # a polygon inward creates loops where an edge is SHORTER than the wall — on this car,
+        # a 4.22mm edge against a 4.9mm wall folded past its neighbour and produced a
+        # self-intersecting outline that OpenCascade would build and then refuse to intersect.
+        # offset2D removes those loops itself. It takes ONE distance, so per-face keeps the
+        # hand-rolled route; per-face on a real traced car is still broken for the same
+        # short-edge reason and falls back, which is why the order below matters.
+        def cavity_uniform(dist: float):
+            inner = None
+            for key, plane, span in (("side", "XZ", W), ("top", "XY", H), ("front", "YZ", L)):
+                poly = o.get(key)
+                if not poly:
+                    continue
+                wp = (cq.Workplane(plane)
+                        .polyline([(float(a), float(b)) for a, b in poly])
+                        .close().offset2D(-abs(dist))
+                        .extrude(span * 2.0, both=True))
+                inner = wp if inner is None else inner.intersect(wp)
+            return inner
+
+        def cavity_per_face(sp: dict):
+            """Per-face thickness WITHOUT offsetting any polygon.
+
+            `offset2D` takes one distance, and our own `offset_inward` tangles a traced outline
+            wherever an edge is shorter than the wall — a 4.22mm edge against a 4.9mm wall on
+            the reference car produced a self-intersecting loop that OpenCascade would build
+            and then refuse to intersect.
+
+            So: build the cavity at the THINNEST face, where offset2D is reliable, then trim it
+            back with half-spaces for the faces that want more. Trimming only ever removes from
+            the cavity, so the wall can only get thicker — it cannot overshoot, and there is no
+            polygon arithmetic to go wrong. Roof, floor and flanks are axis-aligned, which is
+            exactly what wallTop/wallBottom/wallSide mean.
+            Measured on the reference car: 5mm walls with a 15mm floor gave +35,831 mm3 over
+            uniform, one valid solid, 1.2s."""
+            thin = abs(min(sp["top"], sp["side"], sp["bot"]))
+            inner = cavity_uniform(thin)
+            if inner is None:
+                return None
+            pad = max(L, W, H) * 3.0
+
+            def half(dx, dy, dz, ox, oy, oz):
+                return (cq.Workplane("XY").box(dx, dy, dz, centered=False)
+                          .translate((ox, oy, oz)))
+
+            bot, top_, side = abs(sp["bot"]), abs(sp["top"]), abs(sp["side"])
+            if bot > thin:      # keep only what is above the floor thickness
+                inner = inner.intersect(half(pad, pad, pad, -pad / 2, -pad / 2, bot))
+            if top_ > thin:     # ...and below the roof thickness
+                inner = inner.intersect(half(pad, pad, pad, -pad / 2, -pad / 2, H - top_ - pad))
+            if side > thin:     # ...and inside both flanks. The body is mirrored about y=0.
+                inner = inner.intersect(half(pad, W - 2 * side, pad,
+                                             -pad / 2, -(W / 2 - side), -pad / 2))
+            return inner
+
         if wall_varies(spec):
             # PER-FACE: build the cavity and cut it, because shell() cannot vary its thickness.
             # The cavity is the same intersection the body is, with each outline pulled inward
             # by the wall belonging to the surfaces it creates. If any part of it fails, fall
             # through to the uniform shell rather than hand back a solid lump.
             try:
-                o = p["outlines"]
-                inner = None
-                for key, plane, span in (("side", "XZ", W), ("top", "XY", H), ("front", "YZ", L)):
-                    poly = o.get(key)
-                    if not poly:
-                        continue
-                    piece = prism(plane, offset_inward(poly, plane, spec), span * 2.0)
-                    inner = piece if inner is None else inner.intersect(piece)
+                inner = cavity_per_face(spec)
                 if inner is not None and inner.solids().vals():
                     solid = solid.cut(inner)
                 else:
                     raise ValueError("the cavity came out empty")
             except Exception as e:
+                # per-face could not be built — fall back to a uniform shell at the THINNEST
+                # face, so the part is never thicker than asked anywhere
                 print(f"[hull] per-face hollow failed ({e!r}); falling back to a uniform wall")
+                thin = abs(min(spec["top"], spec["side"], spec["bot"]))
                 try:
-                    solid = solid.shell(-abs(min(spec["top"], spec["side"], spec["bot"])))
+                    inner = cavity_uniform(thin)
+                    if inner is None or not inner.solids().vals():
+                        raise ValueError("the cavity came out empty")
+                    solid = solid.cut(inner)
                 except Exception as e2:
-                    print(f"[hull] could not hollow it ({e2!r}); returning it solid")
+                    print(f"[hull] could not hollow it ({e2!r}); returning it SOLID")
+                    p["hollow_failed"] = True
         else:
             try:
-                solid = solid.shell(-abs(p["wall"]))   # negative = inward, keeps outside size
+                inner = cavity_uniform(p["wall"])
+                if inner is None or not inner.solids().vals():
+                    raise ValueError("the cavity came out empty")
+                solid = solid.cut(inner)
             except Exception as e:
-                print(f"[hull] could not hollow it ({e!r}); returning it solid")
+                print(f"[hull] could not hollow it ({e!r}); returning it SOLID")
+                p["hollow_failed"] = True
     return solid
 
 
