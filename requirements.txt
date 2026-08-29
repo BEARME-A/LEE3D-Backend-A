@@ -11,7 +11,17 @@ opencv-python-headless==4.10.0.84
 numpy==1.26.4
 pymupdf==1.24.7
 
-# NOTE: cadquery + OpenCascade are NOT pip-reliable across platforms.
-# Install them via conda (see environment.yml). The API boots without them and
-# returns a clear 503 from /generate until the CAD env is present.
-# cadquery==2.4.0
+# THE CAD KERNEL — still optional, but no longer conda-only.
+#
+# This said cadquery was "NOT pip-reliable across platforms" and had to come from conda. That
+# was true of 2.4.0; `pip install cadquery` now brings 2.8.0 down cleanly on Linux with Python
+# 3.11+, in a couple of minutes. It is left OUT of this file on purpose so the API still boots
+# on a light image — it returns a clear 503 from /generate until the kernel is present — but CI
+# installs it in a separate `cad` job and the kernel tests run there for real.
+#
+# Worth knowing why that matters: while it was believed to be conda-only, the kernel tests were
+# left to "run locally" and in practice ran nowhere at all. The exact build's geometry went
+# unchecked for months while its plan was tested thoroughly.
+#
+#   pip install cadquery      # 2.8.0, ~2 min, Linux/py3.11+ verified
+# cadquery==2.8.0
