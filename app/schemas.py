@@ -61,6 +61,48 @@ class Profile(BaseModel):
     wheels: List[Wheel] = []
     wheelLayout: Optional[WheelLayout] = None
 
+    # ---- THE TRACED SHAPE, and everything carved into it -------------------------------
+    # These were the fields the comment below is about: the ones that got silently deleted.
+    # Naming them does three things — the auto-generated API docs describe a real profile,
+    # `extra="allow"` stops being the only thing protecting the traced shape, and the schema
+    # coverage checker in LEE3D-Lib stops reporting 40 undeclared keys.
+    # All Optional with a None default, because ABSENT and NULL must mean the same thing here.
+    # Verified, not assumed: `_hollow_wanted` returns True for hullHollow absent, hullHollow
+    # null, and both null together — the sepBottom/hullHollow trap described below does not
+    # reopen by declaring these.
+    sidePoly: Optional[List[Point]] = None      # side silhouette, 0..1 of length by 0..1 of height
+    sidePolyR: Optional[List[Point]] = None     # right flank when it differs; None = symmetric
+    topPoly: Optional[List[Point]] = None       # plan silhouette
+    frontPoly: Optional[List[Point]] = None     # front silhouette
+    bottomPoly: Optional[List[Point]] = None    # underside silhouette
+    extraViews: Optional[List[dict]] = None     # silhouettes from arbitrary angles (photo path)
+    features: Optional[List[dict]] = None       # carved details: -depth cuts, +depth raises
+    carveMode: Optional[str] = None             # "field" | "stamp"
+
+    # ---- hollowing ---------------------------------------------------------------------
+    hullHollow: Optional[bool] = None           # None means "ask sepBottom", see _hollow_wanted
+    wallThickness: Optional[float] = None
+    wallPerFace: Optional[bool] = None
+    wallTop: Optional[float] = None             # the load-bearing control: a thick floor to
+    wallSide: Optional[float] = None            # bolt through with thin walls elsewhere
+    wallBottom: Optional[float] = None
+    closedBottom: Optional[bool] = None
+    openArches: Optional[bool] = None           # older name for openUnderside; both are written
+    openUnderside: Optional[bool] = None
+    fieldHollow: Optional[bool] = None
+    adaptiveWall: Optional[bool] = None         # retired; honoured so older files load unchanged
+
+    # ---- build settings ----------------------------------------------------------------
+    hullCrisp: Optional[float] = None           # 0 = smooth body, 1 = exactly the traced outline
+    hullRes: Optional[int] = None
+    hullQuality: Optional[str] = None           # "fast" | "normal" | "fine"
+    hullFast: Optional[bool] = None             # set only mid-drag; never saved deliberately
+    noDetail: Optional[bool] = None
+    sepBottom: Optional[bool] = None
+    category: Optional[str] = None
+    sculpt: Optional[List[float]] = None
+    sculptStrokes: Optional[List[dict]] = None
+
     # KEEP WHAT WE DON'T UNDERSTAND.
     # pydantic's default is extra="ignore", so every field this model doesn't name was
     # dropped on the way in: sidePoly, sidePolyR, topPoly, frontPoly, bottomPoly, features,
