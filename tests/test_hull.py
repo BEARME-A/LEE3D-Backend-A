@@ -5,7 +5,27 @@ The geometry prep is deliberately kept free of CadQuery so it can be tested anyw
 including CI on the light image, which is where regressions would otherwise hide until
 someone actually asked for a STEP file. The kernel-dependent bits are skipped, not faked.
 """
+import importlib.util
 import pytest
+
+
+def _has_cadquery() -> bool:
+    """Is the CAD kernel importable?
+
+    `importlib.util.find_spec` is the right question, but it can RAISE rather than return None
+    — a broken install, a partially-built OpenCascade, an import hook — and an exception at
+    module level kills COLLECTION, taking every test in this file with it, not just the ones
+    that need the kernel. That is a worse failure than the skip it was meant to produce.
+    Previous guard was `"cadquery" not in sys.modules and True`, which skipped unless cadquery
+    had already been imported — so in a fresh pytest run these never ran at all, even with the
+    kernel installed."""
+    try:
+        return importlib.util.find_spec("cadquery") is not None
+    except Exception:
+        return False
+
+
+HAS_CQ = _has_cadquery()
 
 from app import hull
 
@@ -145,7 +165,7 @@ def test_asking_for_an_exact_build_without_the_kernel_says_so_clearly():
     assert "Dockerfile.full" in str(e.value), "the error should say how to fix it"
 
 
-@pytest.mark.skipif("cadquery" not in [m for m in __import__("sys").modules] and True, reason="needs OpenCascade")
+@pytest.mark.skipif(not HAS_CQ, reason="needs OpenCascade")
 def test_exact_build_when_the_kernel_is_present():  # pragma: no cover - full image only
     cq = pytest.importorskip("cadquery")
     solid = hull.build_solid(PROFILE)
@@ -388,3 +408,134 @@ def test_a_degenerate_outline_does_not_explode():
     assert len(out) == 5
     for x, y in out:
         assert abs(x) < 1e6 and abs(y) < 1e6, f"runaway corner at {(x, y)}"
+
+
+def _block_with(features, length=100.0, height=40.0, half_width=30.0):
+    """A plain rectangular block, so a volume can be predicted by hand rather than compared
+    against a previous run of the same code."""
+    return {
+        "length": length,
+        "topProfile": [[0, height], [1, height]],
+        "widthProfile": [[0, half_width], [1, half_width]],
+        "sidePoly": [[0, 0], [1, 0], [1, 1], [0, 1]],
+        "topPoly": [[0, 0], [1, 0], [1, 1], [0, 1]],
+        "frontPoly": [[0, 0], [1, 0], [1, 1], [0, 1]],
+        "hullHollow": False,
+        "features": features,
+    }
+
+
+@pytest.mark.skipif(not HAS_CQ, reason="needs OpenCascade")
+def test_a_hollow_profile_comes_back_hollow():  # pragma: no cover - needs the kernel
+    """The one nobody had written, and the reason it mattered.
+
+    `build_solid(profile)` used to default `hollow` to False regardless of what the profile
+    said, so calling it directly returned a SOLID BLOCK in silence. Every test written against
+    it was therefore measuring a solid — including four of mine that were named for the
+    hollowing they were not checking. They passed for a year of sessions.
+
+    Nothing shipped was broken by it: the real export path passes the flag. But a test that
+    cannot fail is worse than no test, because it is counted."""
+    block = _block_with([])
+    block["hullHollow"] = True
+    block["wallThickness"] = 5.0
+    solid = hull.build_solid(_block_with([]))            # hullHollow absent -> a solid block
+    shell = hull.build_solid(block)                      # asks the profile, and it says hollow
+    assert shell.val().Volume() < solid.val().Volume() * 0.7, (
+        f"a profile that says hullHollow must come back hollow: "
+        f"{shell.val().Volume():.0f} vs a solid {solid.val().Volume():.0f} mm3")
+    # and an explicit flag must still win, so the export path is unaffected
+    assert hull.build_solid(block, hollow=False).val().Volume() == solid.val().Volume()
+
+
+@pytest.mark.skipif(not HAS_CQ, reason="needs OpenCascade")
+def test_a_thick_floor_really_is_thicker_in_the_solid():  # pragma: no cover - needs the kernel
+    """The per-face cavity, built for real. This shipped verified only through `plan()` and the
+    polygon maths — the CAD half had never been executed anywhere.
+
+    A 100x60 block with 5mm walls and a 15mm floor should hold about 45,000 cubic mm more
+    material than the uniform version: the extra 10mm of floor over roughly 90x50 of cavity."""
+    base = _block_with([])
+    base["hullHollow"] = True
+    uniform = dict(base, wallThickness=5.0, wallTop=5.0, wallSide=5.0, wallBottom=5.0)
+    thick = dict(base, wallThickness=5.0, wallTop=5.0, wallSide=5.0, wallBottom=15.0)
+    u = hull.build_solid(uniform).val().Volume()
+    t = hull.build_solid(thick).val().Volume()
+    assert t > u, f"a thicker floor must add material ({t:.0f} vs {u:.0f})"
+    assert abs((t - u) - 45000) < 15000, (
+        f"a 10mm thicker floor should add roughly 45,000 cubic mm, added {t - u:.0f}")
+    assert hull.build_solid(thick).val().isValid(), "and the result must be a valid solid"
+
+
+@pytest.mark.skipif(not HAS_CQ, reason="needs OpenCascade")
+def test_a_real_traced_car_comes_back_hollow():  # pragma: no cover - needs the kernel
+    """The bug this exists to prevent, and it shipped for months.
+
+    `shell()` offsets every face at once. On a traced car that is 188 faces, many near-tangent,
+    and one bad offset returns a Null TopoDS_Shape. The code caught it, printed a line nobody
+    reads, and returned the SOLID — so a real car exported as 807 cm3 of material where a
+    4.9mm shell was asked for. No error, valid file, wrong part.
+
+    A unit block has six faces and shells fine, so every existing test passed. Only a real
+    traced outline shows it, which is why this test loads one rather than building a box."""
+    import json as _json
+    from pathlib import Path as _Path
+    candidates = [
+        _Path(__file__).resolve().parent.parent.parent / "LEE3D-Lib" / "schema" / "fixture-charger.profile.json",
+        _Path(__file__).resolve().parent.parent.parent / "lib" / "schema" / "fixture-charger.profile.json",
+    ]
+    car = None
+    for c in candidates:
+        if c.exists():
+            car = _json.loads(c.read_text(encoding="utf8"))
+            break
+    if car is None:
+        pytest.skip("no traced car available — check out LEE3D-Lib beside this repo")
+
+    plain = dict(car, features=[])
+    solid = hull.build_solid(plain, hollow=False).val().Volume()
+    shell = hull.build_solid(plain).val()          # profile says hullHollow
+    assert shell.isValid(), "the hollow build must still be a valid solid"
+    assert len(shell.Solids()) == 1, "and one piece, not fragments"
+    assert shell.Volume() < solid * 0.7, (
+        f"a real traced car must come back HOLLOW: {shell.Volume():.0f} mm3 against a solid "
+        f"{solid:.0f}. If these are equal, shell()/the cavity has failed and been swallowed.")
+
+
+@pytest.mark.skipif(not HAS_CQ, reason="needs OpenCascade")
+def test_per_face_walls_work_on_a_real_traced_car():  # pragma: no cover - needs the kernel
+    """Per-face thickness on a REAL outline, not a box.
+
+    The first implementation offset each traced polygon inward by its own face's wall. That
+    tangles any outline with an edge shorter than the wall — a 4.22mm edge against a 4.9mm wall
+    on this car — and the resulting self-intersecting loop builds into a solid that then
+    refuses to intersect with anything. Every pair of inset prisms came out empty. The unit
+    square tests all passed, because a square has four long edges.
+
+    The working approach offsets nothing: build the cavity at the THINNEST face, where
+    offset2D is reliable, then trim it back with half-spaces for the faces that want more.
+    Trimming can only make a wall thicker, never thinner, and there is no polygon arithmetic
+    to go wrong."""
+    import json as _json
+    from pathlib import Path as _Path
+    car = None
+    for c in [_Path(__file__).resolve().parent.parent.parent / n / "schema" / "fixture-charger.profile.json"
+              for n in ("LEE3D-Lib", "lib")]:
+        if c.exists():
+            car = _json.loads(c.read_text(encoding="utf8"))
+            break
+    if car is None:
+        pytest.skip("no traced car available — check out LEE3D-Lib beside this repo")
+
+    body = dict(car, features=[])
+    uniform = hull.build_solid(dict(body, wallThickness=5, wallTop=5, wallSide=5,
+                                    wallBottom=5)).val().Volume()
+    for name, w in (("floor", dict(wallTop=5, wallSide=5, wallBottom=15)),
+                    ("roof", dict(wallTop=15, wallSide=5, wallBottom=5)),
+                    ("side", dict(wallTop=5, wallSide=12, wallBottom=5))):
+        g = hull.build_solid(dict(body, wallThickness=5, **w)).val()
+        assert g.isValid() and len(g.Solids()) == 1, f"{name}: not one valid solid"
+        assert g.Volume() > uniform * 1.02, (
+            f"thickening the {name} must add material on a real car "
+            f"({g.Volume():.0f} vs uniform {uniform:.0f} mm3) — if it does not, per-face has "
+            f"silently fallen back to a uniform wall")
