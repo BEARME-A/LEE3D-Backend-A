@@ -531,6 +531,29 @@ def build_solid(profile: Dict[str, Any], hollow: bool | None = None,
         # hand-rolled route; per-face on a real traced car is still broken for the same
         # short-edge reason and falls back, which is why the order below matters.
         def cavity_uniform(dist: float):
+            """A COLLAPSED OFFSET IS NOT AN EMPTY CAVITY — it is a plane that stopped voting.
+
+            At `dist` exactly equal to an outline's inradius, `offset2D` does not raise. It
+            returns a wire of area 0.0, and extruding that gives a solid of volume 0.0.
+            `intersect()` against a zero-volume solid is a SILENT NO-OP in OpenCascade: the
+            other operand comes back untouched. So the planes that collapsed simply stopped
+            constraining the cavity, and whichever plane survived became the whole of it.
+
+            Measured on the 100x40x60 block at a 20mm wall (its inradius exactly): side and
+            front both offset to area 0.0000, top offset to 1200.0 and extruded to 192000, and
+            the "intersection" of all three was the top prism alone. Cutting it removed 48000
+            mm3 through the FULL height of the body — a through-slot, not a shell — and the
+            build reported success. One tick either side behaves correctly: 19.9999 removes
+            0.2mm3 as it should, 20.0001 raises and is reported as a failed hollow.
+
+            So this is a knife-edge on exact equality, and the answer at that point is that no
+            cavity exists. Raising here hands it to the caller's existing handler, which
+            returns the SOLID and sets `hollow_failed` — identical to 20.0001, which is the
+            behaviour that was already right.
+
+            The threshold is absolute and tiny on purpose. A legitimately thin cavity is still
+            a cavity: at 19.9999 the surviving volume is 2.9mm3, six orders of magnitude above
+            this, and must not be rejected. Only an exact collapse is caught."""
             inner = None
             for key, plane, span in (("side", "XZ", W), ("top", "XY", H), ("front", "YZ", L)):
                 poly = o.get(key)
@@ -540,6 +563,11 @@ def build_solid(profile: Dict[str, Any], hollow: bool | None = None,
                         .polyline([(float(a), float(b)) for a, b in poly])
                         .close().offset2D(-abs(dist))
                         .extrude(span * 2.0, both=True))
+                solids = wp.solids().vals()
+                if not solids or sum(s.Volume() for s in solids) <= 1e-6:
+                    raise ValueError(
+                        f"the {key} outline collapses to nothing at a {abs(dist):g}mm wall, "
+                        f"so there is no cavity to build")
                 inner = wp if inner is None else inner.intersect(wp)
             return inner
 
