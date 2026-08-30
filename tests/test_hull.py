@@ -613,3 +613,56 @@ def test_export_bytes_passes_the_report_back_up():
     data, mime, name = hull.export_bytes(block, fmt="step", hollow=True, report=report)
     assert report.get("hollow_failed") is True, f"it must survive export_bytes: {report!r}"
     assert data and mime == "application/step", "and the export still works normally"
+
+
+@pytest.mark.skipif(not HAS_CQ, reason="needs OpenCascade")
+def test_a_wall_at_exactly_the_inradius_is_a_failed_hollow_not_a_through_slot():
+    # pragma: no cover - needs the kernel
+    """THE KNIFE-EDGE. `offset2D` at exactly an outline's inradius does not raise — it returns
+    a wire of area 0.0, and extruding that gives a solid of volume 0.0. Intersecting against a
+    zero-volume solid is a SILENT NO-OP in OpenCascade, so the collapsed planes stopped
+    constraining the cavity and whichever plane survived became the whole of it.
+
+    Measured on the 100x40x60 block at its 20mm inradius: side and front both offset to area
+    0.0000, top offset to 1200.0, and the "intersection" was the top prism alone. The cut
+    removed 48000mm3 through the FULL height — an open through-slot in a part whose whole
+    contract is to be closed and hollow — and it reported success.
+
+    It is reachable with ordinary numbers. A 40x10x20mm bracket at a 5mm wall is the same
+    point: 3000mm3 of an 8000mm3 part, 38%, sliced out and called a shell.
+
+    One tick either side was always right: 19.9999 removes 0.2mm3 as it should, 20.0001 raises
+    and is reported as a failed hollow. This pins the point between them to the 20.0001
+    behaviour, which is the correct one.
+
+    Three geometries, because the critical wall is min(half-height, half-width) and NOT
+    half-height — the 90-tall block fails at 30 (its half-width), not at 45. One geometry
+    would have recorded the wrong rule."""
+    for name, kw, crit in (("100x40x60", dict(height=40.0, half_width=30.0), 20.0),
+                           ("100x26x60", dict(height=26.0, half_width=30.0), 13.0),
+                           ("100x90x60", dict(height=90.0, half_width=30.0), 30.0),
+                           ("40x10x20", dict(length=40.0, height=10.0, half_width=10.0), 5.0)):
+        solid = hull.build_solid(_block_with([], **kw), hollow=False).val().Volume()
+        body = _block_with([], **kw)
+        body["hullHollow"] = True
+        body["wallThickness"] = crit
+
+        report: dict = {}
+        got = hull.build_solid(body, report=report).val().Volume()
+
+        assert report.get("hollow_failed") is True, (
+            f"{name}: at a {crit}mm wall no cavity can exist, so this is a FAILED hollow and "
+            f"must say so rather than cutting a slot; got {report!r}")
+        assert abs(got - solid) < 0.5, (
+            f"{name}: a failed hollow returns the solid untouched — {solid - got:.1f}mm3 was "
+            f"removed, which is a through-slot, not a shell")
+
+    # and the tick below the edge must still hollow normally, or the guard is too greedy
+    below = _block_with([])
+    below["hullHollow"] = True
+    below["wallThickness"] = 19.9999
+    report = {}
+    v = hull.build_solid(below, report=report).val().Volume()
+    assert report.get("hollow_failed") is False, "a hair under the edge still builds a cavity"
+    assert 0.1 < (240000.0 - v) < 0.4, (
+        f"and it removes the 0.2mm3 it should, not nothing: {240000.0 - v:.3f}mm3")
