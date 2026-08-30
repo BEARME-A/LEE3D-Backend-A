@@ -174,8 +174,15 @@ def solid(
                 "have no solid meaning and are not in the exact build. Everything else is."
             ),
         }
+    # WHAT THE PLAN CANNOT KNOW. `plan()` reports hollow:true because the profile asked for a
+    # shell — not because one was built. When the cavity comes out empty the build catches it,
+    # prints, and hands back a SOLID; until now that never left `build_solid`, so the studio
+    # could download a solid lump from a request that reported hollow:true and nothing said so.
+    # Same lesson as the pockets and the extra views: a quiet difference between the two ends
+    # is worse than a loud limitation.
+    report: dict = {}
     try:
-        data, mime, name = export_bytes(profile, fmt=fmt, hollow=hollow)
+        data, mime, name = export_bytes(profile, fmt=fmt, hollow=hollow, report=report)
     except CadUnavailable as e:
         raise HTTPException(503, str(e))
     except ValueError as e:
@@ -193,6 +200,11 @@ def solid(
                  "X-LEE3D-Raises": str(len(p["raises"])),
                  "X-LEE3D-Skipped": str(len(p["surface_only"])),
                  "X-LEE3D-Unusable-Views": str(p["unusable_views"]),
+                 # "1" only when a shell was ASKED FOR and the cavity could not be built, so
+                 # this file is solid. "0" covers both "hollowed fine" and "never asked" —
+                 # the studio only needs to warn about the one case where what it got is not
+                 # what the plan said it would get.
+                 "X-LEE3D-Hollow-Failed": "1" if report.get("hollow_failed") else "0",
                  # the studio reads this and tells the user, rather than the STEP quietly
                  # being a different shape from the preview it was built beside
                  "X-LEE3D-Symmetric-Only": "1" if p["ignored_second_side"] else "0"},
