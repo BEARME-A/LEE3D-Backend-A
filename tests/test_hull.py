@@ -539,3 +539,77 @@ def test_per_face_walls_work_on_a_real_traced_car():  # pragma: no cover - needs
             f"thickening the {name} must add material on a real car "
             f"({g.Volume():.0f} vs uniform {uniform:.0f} mm3) — if it does not, per-face has "
             f"silently fallen back to a uniform wall")
+
+
+@pytest.mark.skipif(not HAS_CQ, reason="needs OpenCascade")
+def test_a_hollow_that_fails_says_so_instead_of_returning_a_quiet_solid():
+    # pragma: no cover - needs the kernel
+    """`plan()` reports hollow:true because the PROFILE asked for a shell. It has no way of
+    knowing whether one was actually built — the cavity can come out empty, and when it does
+    the build catches it, prints, and returns the SOLID.
+
+    Until now that fact never left `build_solid`: `p["hollow_failed"]` was set on a plan dict
+    created inside the function and thrown away on return. So a caller could ask for a shell,
+    be told hollow:true, and be handed a solid lump with nothing anywhere saying so. Same
+    family as the pockets vanishing from every STEP and the extra views being ignored.
+
+    A 40mm wall on a 40mm-tall block cannot leave a cavity — the inset collapses before it
+    encloses anything. That is the honest trigger, and it needs no monkeypatching."""
+    block = _block_with([])                    # 100 long, 40 tall, 60 wide
+    block["hullHollow"] = True
+    block["wallThickness"] = 40.0              # >= the half-height: no cavity is possible
+
+    report: dict = {}
+    solid = hull.build_solid(block, report=report)
+
+    assert report.get("hollow_failed") is True, (
+        "the cavity cannot exist at this wall, so the build must report the failure; "
+        f"got {report!r}")
+    assert "hollow_failed_reason" in report, "and it must say WHY, not just that it failed"
+
+    plain = hull.build_solid(_block_with([]), hollow=False).val().Volume()
+    assert abs(solid.val().Volume() - plain) < 1.0, (
+        f"a failed hollow returns the solid unchanged: {solid.val().Volume():.0f} "
+        f"vs {plain:.0f} mm3")
+
+    # and plan() still cheerfully says hollow:true — which is exactly why the report is needed
+    assert hull.plan(block)["hollow"] is True
+
+
+@pytest.mark.skipif(not HAS_CQ, reason="needs OpenCascade")
+def test_a_hollow_that_works_reports_false_not_nothing():
+    # pragma: no cover - needs the kernel
+    """An ABSENT key and a False key mean different things: "nobody asked for a shell" versus
+    "a shell was asked for and it worked". If only the failure path ever wrote to the report,
+    the caller could not tell a success from a build that never tried, and would have to guess.
+    Guessing is what put the pockets bug in the field."""
+    block = _block_with([])
+    block["hullHollow"] = True
+    block["wallThickness"] = 5.0               # comfortably buildable on this block
+
+    report: dict = {}
+    shell = hull.build_solid(block, report=report)
+    assert report.get("hollow_failed") is False, f"a working hollow reports False: {report!r}"
+
+    solid = hull.build_solid(_block_with([]), hollow=False).val().Volume()
+    assert shell.val().Volume() < solid * 0.7, "and it really is hollow"
+
+    # a profile that never asked writes nothing at all
+    untouched: dict = {}
+    hull.build_solid(_block_with([]), report=untouched)
+    assert "hollow_failed" not in untouched, (
+        f"a solid build must not claim anything about hollowing: {untouched!r}")
+
+
+@pytest.mark.skipif(not HAS_CQ, reason="needs OpenCascade")
+def test_export_bytes_passes_the_report_back_up():
+    # pragma: no cover - needs the kernel
+    """The endpoint calls `export_bytes`, not `build_solid`. A report that stops one frame
+    short of the caller is no better than one that never left."""
+    block = _block_with([])
+    block["hullHollow"] = True
+    block["wallThickness"] = 40.0
+    report: dict = {}
+    data, mime, name = hull.export_bytes(block, fmt="step", hollow=True, report=report)
+    assert report.get("hollow_failed") is True, f"it must survive export_bytes: {report!r}"
+    assert data and mime == "application/step", "and the export still works normally"
