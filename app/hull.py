@@ -351,8 +351,18 @@ def plan(profile: Dict[str, Any]) -> Dict[str, Any]:
 # --------------------------------------------------------------------------------------
 # The exact build. Needs OpenCascade.
 # --------------------------------------------------------------------------------------
-def build_solid(profile: Dict[str, Any], hollow: bool | None = None):
+def build_solid(profile: Dict[str, Any], hollow: bool | None = None,
+                report: Dict[str, Any] | None = None):
     """`hollow=None` means ASK THE PROFILE, which is almost always what a caller wants.
+
+    `report` is an optional dict the caller owns. Anything the BUILD learns that the PLAN
+    could not know is written into it. Today that is one key, `hollow_failed`.
+
+    Why an out-parameter rather than a second return value: `build_solid` returns a
+    Workplane and is called from six places in the tests plus `export_bytes`. Changing the
+    return type to a tuple would break every one of them, and a caller that does not care
+    about the report should not have to unpack it. Passing a dict in costs nothing and the
+    old call signature keeps working unchanged.
 
     It used to default to False, so `build_solid(profile)` on a profile that says
     `hullHollow: true` returned a solid block and said nothing. The real export path passes the
@@ -494,6 +504,13 @@ def build_solid(profile: Dict[str, Any], hollow: bool | None = None):
             print(f"[hull] raises would not fuse ({e!r}); leaving them out")
 
     if hollow and p["wall"] > 0:
+        # Seed it FALSE before trying. An absent key and a False key mean different things —
+        # "nobody asked for a shell" versus "a shell was asked for and it worked" — and the
+        # caller cannot tell them apart if only the failure path ever writes. That distinction
+        # is the whole reason this exists: `plan()` says hollow:true because the profile asked,
+        # not because it succeeded, and nothing downstream could see the difference.
+        if report is not None:
+            report["hollow_failed"] = False
         spec = p["wall_spec"]
         # BUILD THE CAVITY, DO NOT OFFSET THE FACES.
         # `shell()` offsets every face at once and needs them all to offset consistently. On a
@@ -585,6 +602,9 @@ def build_solid(profile: Dict[str, Any], hollow: bool | None = None):
                 except Exception as e2:
                     print(f"[hull] could not hollow it ({e2!r}); returning it SOLID")
                     p["hollow_failed"] = True
+                    if report is not None:
+                        report["hollow_failed"] = True
+                        report["hollow_failed_reason"] = repr(e2)
         else:
             try:
                 inner = cavity_uniform(p["wall"])
@@ -594,16 +614,24 @@ def build_solid(profile: Dict[str, Any], hollow: bool | None = None):
             except Exception as e:
                 print(f"[hull] could not hollow it ({e!r}); returning it SOLID")
                 p["hollow_failed"] = True
+                if report is not None:
+                    report["hollow_failed"] = True
+                    report["hollow_failed_reason"] = repr(e)
     return solid
 
 
-def export_bytes(profile: Dict[str, Any], fmt: str = "step", hollow: bool = False):
-    """Exact solid -> (bytes, mime, filename)."""
+def export_bytes(profile: Dict[str, Any], fmt: str = "step", hollow: bool = False,
+                 report: Dict[str, Any] | None = None):
+    """Exact solid -> (bytes, mime, filename).
+
+    `report` is passed straight through to `build_solid`. The return type is deliberately
+    unchanged — a caller that wants to know whether the shell was actually built passes a
+    dict in and reads it afterwards, and every existing caller keeps working."""
     cq = _import_cq()
     import tempfile
     from pathlib import Path
 
-    solid = build_solid(profile, hollow=hollow)
+    solid = build_solid(profile, hollow=hollow, report=report)
     name = (profile.get("name") or "model").strip().replace(" ", "-") or "model"
     fmt = (fmt or "step").lower()
     ext = {"step": "step", "stl": "stl"}.get(fmt)
