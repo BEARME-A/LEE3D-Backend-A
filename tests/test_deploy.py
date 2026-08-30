@@ -176,3 +176,59 @@ def test_the_endpoint_hollows_by_default_when_the_profile_says_so(monkeypatch):
 
     r3 = c.post("/solid?plan_only=true", json={**prof, "hullHollow": False})
     assert r3.json()["hollow"] is False, "and a solid profile stays solid"
+
+
+def test_the_endpoint_says_when_it_could_not_actually_hollow(monkeypatch):
+    """`plan()` says hollow:true because the profile ASKED for a shell. If the cavity cannot
+    be built the exact build hands back a solid, and until now nothing on the wire said so —
+    the studio would show "hollow" beside a STEP that is a solid lump.
+
+    This is the header half of the fix, and it is deliberately in the FAST job: the geometry
+    that makes a hollow fail is checked in `test_hull.py` under the kernel, but the wiring
+    from report -> header must never be able to rot unnoticed while OpenCascade is absent.
+    That is the whole lesson of the kernel tests that lay dormant for a year.
+    """
+    from fastapi.testclient import TestClient
+    from app import hull
+    from app.main import app
+
+    prof = {
+        "name": "t", "length": 120.0,
+        "topProfile": [[0, 60]], "bottomProfile": [[0, 0]], "widthProfile": [[0, 25]],
+        "sidePoly": [[0, 0], [1, 0], [1, 1], [0, 1]],
+        "topPoly": [[0, 0], [1, 0], [1, 1], [0, 1]],
+        "frontPoly": [[0, 0], [1, 0], [1, 1], [0, 1]],
+        "wallThickness": 3.0, "hullHollow": True, "sepBottom": True,
+    }
+
+    def stub(failed):
+        """A stand-in for the kernel that writes the report the real build would write."""
+        def export(profile, fmt="step", hollow=False, report=None):
+            if report is not None:
+                report["hollow_failed"] = failed
+                if failed:
+                    report["hollow_failed_reason"] = "ValueError('the cavity came out empty')"
+            return b"ISO-10303-21;", "application/step", "t.step"
+        return export
+
+    c = TestClient(app)
+
+    monkeypatch.setattr(hull, "export_bytes", stub(True))
+    r = c.post("/solid", json=prof)
+    assert r.status_code == 200, r.text
+    assert r.headers.get("X-LEE3D-Hollow-Failed") == "1", (
+        "a shell was asked for and not built — the header has to say so, "
+        f"got {dict(r.headers)!r}")
+
+    monkeypatch.setattr(hull, "export_bytes", stub(False))
+    r2 = c.post("/solid", json=prof)
+    assert r2.headers.get("X-LEE3D-Hollow-Failed") == "0", "a working shell reports 0"
+
+    # and a build that never asked for a shell must not report a failure either
+    def never_asked(profile, fmt="step", hollow=False, report=None):
+        return b"ISO-10303-21;", "application/step", "t.step"
+
+    monkeypatch.setattr(hull, "export_bytes", never_asked)
+    r3 = c.post("/solid", json={**prof, "hullHollow": False})
+    assert r3.headers.get("X-LEE3D-Hollow-Failed") == "0", (
+        "an absent report is not a failure — 0 covers both 'worked' and 'never asked'")
