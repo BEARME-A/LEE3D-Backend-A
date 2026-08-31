@@ -70,7 +70,31 @@ def _clean(poly: Sequence[Sequence[float]] | None) -> List[Pt] | None:
         out.append((x, y))
     while len(out) > 1 and abs(out[0][0] - out[-1][0]) < 1e-9 and abs(out[0][1] - out[-1][1]) < 1e-9:
         out.pop()                     # the extruder closes it for us
-    return out if len(out) >= 3 else None
+    if len(out) < 3:
+        return None
+    # AREA, NOT POINT COUNT. Three DISTINCT points can still be collinear, and a line has no
+    # area to extrude. `polyline(...).close().extrude()` on one does not raise — it returns
+    # solids of volume 0.0, and OpenCascade's booleans handle those by DISCARDING them:
+    # `intersect` hands back the other operand whole, `cut` and `union` empty the result. So a
+    # flat outline was never rejected, it was silently obeyed as "no constraint at all".
+    #
+    # Measured, both reachable from a traced profile:
+    #   sidePoly [[0,0],[0.5,0],[1,0]]           -> the side view stopped constraining the
+    #                                               intersection and the body came out as the
+    #                                               full 240000mm3 bounding box.
+    #   a feature poly [[.2,.4],[.5,.4],[.7,.4]] -> WORSE. `tool.intersect(slab)` discarded the
+    #                                               zero-volume tool and returned the SLAB, so
+    #                                               a feature that should carve nothing cut a
+    #                                               3mm slot 12000mm3 clean across the body.
+    #
+    # This is the same mistake as testing `solids().vals()` for presence instead of volume, in
+    # a third place: the guard counted points when what matters is whether there is any shape.
+    # The threshold is absolute and tiny on purpose — these coordinates are normalised 0..1,
+    # where a legitimately thin 0.0001-wide sliver still measures 5e-5 in area, nine orders
+    # above this. Only an exact collapse is caught.
+    if poly_area(out) <= 1e-12:
+        return None
+    return out
 
 
 # =======================================================================================
@@ -512,6 +536,11 @@ def build_solid(profile: Dict[str, Any], hollow: bool | None = None,
         if report is not None:
             report["hollow_failed"] = False
         spec = p["wall_spec"]
+        # "Leave the underside open" — the studio's tick, which this end has never read.
+        # Both spellings, because the studio writes openUnderside and older saved profiles
+        # carry openArches. `or` rather than `??`: a file holding the newer key as False
+        # while the older one is True should still open, which is how the studio reads it too.
+        open_under = bool(profile.get("openUnderside") or profile.get("openArches"))
         # BUILD THE CAVITY, DO NOT OFFSET THE FACES.
         # `shell()` offsets every face at once and needs them all to offset consistently. On a
         # traced car that is 188 faces, many near-tangent, and one bad offset returns a Null
@@ -606,13 +635,50 @@ def build_solid(profile: Dict[str, Any], hollow: bool | None = None,
                                              -pad / 2, -(W / 2 - side), -pad / 2))
             return inner
 
+        def open_the_underside(inner):
+            """Drop the floor when the studio's "Leave the underside open" is ticked.
+
+            The backend never read this flag at all — it always built a closed shell — so a
+            model the studio showed with an open underside came back from STEP export with a
+            floor. Same class as the pockets: the two ends disagreeing about the shape of the
+            part, quietly.
+
+            The cavity's own footprint is ALREADY inset by one wall from the flanks; that is
+            what makes the side walls. So a copy of the cavity pushed straight down further
+            than the floor is thick sweeps a prism with exactly that footprint, from the
+            cavity's floor down through the bottom of the body. Cutting it removes the floor
+            and cannot touch the side walls, because it never gets wider than the cavity.
+
+            Done as a union with the cavity rather than a second cut so that the whole hollow
+            stays one operation — a second `cut` against a shape that may not intersect is a
+            chance for OpenCascade to hand back something surprising, and this engine has been
+            bitten by exactly that before."""
+            if inner is None or not open_under:
+                return inner
+            # THE TRANSLATE HAS TO OVERLAP. A first attempt pushed one copy down by more than
+            # the whole body height, which lands it entirely BELOW the part with a gap between
+            # — so the union was two disconnected lumps and the cut removed exactly nothing.
+            # Volume came back identical open and closed, which is the same "identical output
+            # means the code path did not run" signal this file keeps being caught by.
+            #
+            # Double instead: each step moves the shape by no more than the height it has
+            # already gained, so every copy overlaps the last and the result is one connected
+            # prism. Three unions reach 7x the floor thickness, which clears it comfortably,
+            # and anything that ends up below the body simply cuts nothing.
+            floor = max(0.2, abs(spec.get("bot") or p["wall"]))
+            ext, d = inner, floor
+            for _ in range(3):
+                ext = ext.union(ext.translate((0, 0, -d)))
+                d *= 2.0
+            return ext
+
         if wall_varies(spec):
             # PER-FACE: build the cavity and cut it, because shell() cannot vary its thickness.
             # The cavity is the same intersection the body is, with each outline pulled inward
             # by the wall belonging to the surfaces it creates. If any part of it fails, fall
             # through to the uniform shell rather than hand back a solid lump.
             try:
-                inner = cavity_per_face(spec)
+                inner = open_the_underside(cavity_per_face(spec))
                 if inner is not None and inner.solids().vals():
                     solid = solid.cut(inner)
                 else:
@@ -623,7 +689,7 @@ def build_solid(profile: Dict[str, Any], hollow: bool | None = None,
                 print(f"[hull] per-face hollow failed ({e!r}); falling back to a uniform wall")
                 thin = abs(min(spec["top"], spec["side"], spec["bot"]))
                 try:
-                    inner = cavity_uniform(thin)
+                    inner = open_the_underside(cavity_uniform(thin))
                     if inner is None or not inner.solids().vals():
                         raise ValueError("the cavity came out empty")
                     solid = solid.cut(inner)
@@ -635,7 +701,7 @@ def build_solid(profile: Dict[str, Any], hollow: bool | None = None,
                         report["hollow_failed_reason"] = repr(e2)
         else:
             try:
-                inner = cavity_uniform(p["wall"])
+                inner = open_the_underside(cavity_uniform(p["wall"]))
                 if inner is None or not inner.solids().vals():
                     raise ValueError("the cavity came out empty")
                 solid = solid.cut(inner)
