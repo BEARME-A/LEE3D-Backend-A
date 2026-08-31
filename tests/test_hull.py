@@ -666,3 +666,174 @@ def test_a_wall_at_exactly_the_inradius_is_a_failed_hollow_not_a_through_slot():
     assert report.get("hollow_failed") is False, "a hair under the edge still builds a cavity"
     assert 0.1 < (240000.0 - v) < 0.4, (
         f"and it removes the 0.2mm3 it should, not nothing: {240000.0 - v:.3f}mm3")
+
+
+def test_a_collinear_outline_is_degenerate_even_though_it_has_three_points():
+    """`_clean` counted POINTS. Three distinct points can still be collinear, and a line has
+    no area to extrude.
+
+    The two-point case was already caught and falls back to a box. This one was not: the
+    outline passed through, `polyline().close().extrude()` returned solids of volume 0.0
+    without raising, and `intersect()` DISCARDS a zero-volume operand and hands back the other
+    one whole. So the side view stopped constraining the body and it came out as the full
+    240000mm3 bounding box — not an error, not a warning, just a view silently ignored.
+
+    Asserted on the OUTLINE, not the volume, and deliberately so: the box fallback produces the
+    same body, so the volume is 240000 either way. A volume assertion here would pass whether
+    or not the fix is present. Identical output means the code path did not run."""
+    prof = dict(PROFILE)
+    prof["sidePoly"] = [[0, 0], [0.5, 0], [1, 0]]          # three DISTINCT, all collinear
+    assert len(hull.outlines_mm(prof)["side"]) == 4, (
+        "a zero-area outline has to reach the box fallback like any other degenerate one")
+    # and the two-point case must keep working
+    prof["sidePoly"] = [[0.1, 0.1], [0.2, 0.2]]
+    assert len(hull.outlines_mm(prof)["side"]) == 4
+
+
+def test_a_collinear_feature_carves_nothing_rather_than_a_slab_across_the_body():
+    """The same hole in the same guard, and far worse on this side.
+
+    `shaped = tool.intersect(slab)` with a zero-volume `tool`: OpenCascade discards the
+    collapsed operand and returns the SLAB — measured at 125,000,000mm3 for a 500mm test slab.
+    The slab then became the cutter. A feature with no area cut a 3mm slot straight across the
+    whole part: 240000 -> 228000mm3, exactly 100 x 40 x 3.
+
+    Unlike the outline case this changes the answer, so it is pinned on the volume."""
+    f = {"kind": "poly", "view": "side", "name": "flat", "depth": -3,
+         "poly": [[0.2, 0.4], [0.5, 0.4], [0.7, 0.4]]}
+    assert hull._clean(f["poly"]) is None, "a zero-area feature outline is degenerate"
+    p = hull.plan(dict(PROFILE, features=[f]))
+    assert p["pockets"] == [] and p["through_cuts"] == [] and p["surface_only"] == [], (
+        f"a feature with no area has nothing to build: {p['pockets']} {p['surface_only']}")
+
+
+def test_a_genuinely_thin_sliver_is_still_a_shape():
+    """The collapse guard must catch an exact collapse and nothing else. These coordinates are
+    normalised 0..1, where even a 0.0005-wide sliver measures 3e-4 in area — eight orders above
+    the 1e-12 threshold. A guard that also rejected thin features would be a worse bug than the
+    one it fixed, because thin is exactly what a traced panel line is."""
+    thin = [[0.2, 0.2], [0.2005, 0.2], [0.2005, 0.8], [0.2, 0.8]]
+    assert hull._clean(thin) is not None, "a thin sliver is a shape, not a collapse"
+    p = hull.plan(dict(PROFILE, features=[
+        {"kind": "poly", "view": "side", "name": "sliver", "depth": -3, "poly": thin}]))
+    assert [f["name"] for f in p["pockets"]] == ["sliver"]
+
+
+@pytest.mark.skipif(not HAS_CQ, reason="needs OpenCascade")
+def test_a_zero_volume_operand_is_discarded_by_every_boolean():
+    # pragma: no cover - needs the kernel
+    """THE ROOT CAUSE, pinned directly, because three separate bugs have now come from it and
+    the next one will too if this is only ever written down in a comment.
+
+    A wire with no area still extrudes to solids — they just have volume 0.0. OpenCascade does
+    not treat that as an error in any boolean:
+
+        a.intersect(zero)  -> a, untouched      the constraint silently stops applying
+        a.cut(zero)        -> EMPTY             the model is destroyed
+        a.union(zero)      -> volume 0.0        the model is destroyed
+
+    Note they fail in different directions, so no single instinct covers them. The lesson for
+    any new guard in this file: **test volume, never presence.** `solids().vals()` is non-empty
+    for a collapsed solid — that check passes precisely when it matters most."""
+    import cadquery as cq          # inside the test on purpose: a module-level import would
+                                   # make this file unimportable on the light image and turn
+                                   # the whole fast gate red instead of skipping one test
+    zero = (cq.Workplane("XZ").polyline([(0, 0), (50, 0), (100, 0)])
+            .close().extrude(100.0, both=True))
+    zvals = zero.solids().vals()
+    assert zvals, "a collapsed wire still produces solids — this is the whole trap"
+    assert sum(s.Volume() for s in zvals) <= 1e-9, "with no volume"
+
+    box = cq.Workplane("XY").box(100, 60, 40, centered=False)
+    V = sum(s.Volume() for s in box.solids().vals())
+    assert V == pytest.approx(240000)
+
+    def vol(wp):
+        return sum(s.Volume() for s in wp.solids().vals())
+
+    assert vol(box.intersect(zero)) == pytest.approx(V), "intersect discards it and no-ops"
+    assert vol(box.cut(zero)) <= 1e-9, "cut destroys the model"
+    assert vol(box.union(zero)) <= 1e-9, "union destroys the model"
+
+
+def test_the_studio_rejects_a_zero_area_outline_the_same_way_this_end_does():
+    """BOTH ENDS, PINNED TOGETHER. `_clean` here and `normPoly` in index.html have to agree
+    about what counts as a traced outline, or the preview and the export disagree about the
+    shape of the part — which is the one failure this project cannot tolerate quietly.
+
+    Both were `length >= 3` and both let a collinear outline through. Fixing only this end
+    would have been worse than fixing neither: the backend would fall back to a box while the
+    studio still built from the flat line, and the two would differ with nothing reporting it.
+
+    This reads the studio's source directly rather than trusting a comment, because a comment
+    saying "matches the backend" is exactly what stops being true first."""
+    from pathlib import Path
+    root = Path(__file__).resolve().parent.parent.parent
+    idx = None
+    for cand in (root / "LEE3D-Frontend" / "index.html",
+                 root / "LEE3D-Frontend-main" / "index.html"):
+        if cand.exists():
+            idx = cand
+            break
+    if idx is None:
+        pytest.skip("LEE3D-Frontend is not checked out beside this repo")
+
+    src = idx.read_text(encoding="utf8", errors="ignore")
+    assert "const polyAreaN=" in src, (
+        "the studio's normPoly no longer measures area — it has regressed to counting points, "
+        "and a flat traced outline will now build differently at the two ends")
+    assert "polyAreaN(out)<=1e-12?null:out" in src, (
+        "the studio's zero-area rejection is gone or its threshold has moved away from the "
+        "1e-12 this end uses in _clean")
+
+
+@pytest.mark.skipif(not HAS_CQ, reason="needs OpenCascade")
+def test_leaving_the_underside_open_actually_removes_the_floor():
+    # pragma: no cover - needs the kernel
+    """This end never read the studio's "Leave the underside open" tick at all. It always
+    built a closed shell, so a model shown in the studio with an open underside came back
+    from STEP export with a floor in it.
+
+    Pinned on VOLUME, because that is what changes. A floor removed is material removed, and
+    the bounding box is identical either way — asserting on the box would pass whether or not
+    the flag does anything, which is exactly how this went unnoticed."""
+    block = _block_with([])
+    block["hullHollow"] = True
+    block["wallThickness"] = 5.0
+
+    closed = hull.build_solid(dict(block, openUnderside=False)).val().Volume()
+    opened = hull.build_solid(dict(block, openUnderside=True)).val().Volume()
+
+    assert opened < closed * 0.95, (
+        f"opening the underside has to remove the floor: {opened:.0f} vs {closed:.0f} mm3")
+    # the older spelling must work too — profiles saved before the rename carry openArches
+    legacy = hull.build_solid(dict(block, openArches=True)).val().Volume()
+    assert legacy == pytest.approx(opened, rel=1e-6), (
+        "openArches is the older name for the same tick and must build the same part")
+    # and it must still be one valid solid, not a lump cut in half
+    v = hull.build_solid(dict(block, openUnderside=True)).val()
+    assert v.isValid() and len(v.Solids()) == 1
+
+
+@pytest.mark.skipif(not HAS_CQ, reason="needs OpenCascade")
+def test_the_open_underside_cut_has_to_overlap_the_cavity():
+    # pragma: no cover - needs the kernel
+    """THE BUG IN MY FIRST FIX, pinned so it cannot come back.
+
+    The floor is removed by extending the cavity downward. My first attempt pushed one copy
+    of the cavity down by more than the whole body height — which lands it entirely BELOW the
+    part, with a gap, so the union was two disconnected lumps and the cut took nothing out.
+    Volume came back byte-identical open and closed and it looked like the flag was being
+    ignored again.
+
+    The guard is that the extension must reach BELOW the body while staying connected to the
+    cavity. Checked by measuring how much came out: a disconnected extension removes 0."""
+    block = _block_with([])
+    block["hullHollow"] = True
+    block["wallThickness"] = 5.0
+    closed = hull.build_solid(dict(block, openUnderside=False)).val().Volume()
+    opened = hull.build_solid(dict(block, openUnderside=True)).val().Volume()
+    removed = closed - opened
+    assert removed > 0, "a disconnected extension removes nothing — this is that bug"
+    # the floor of a 100x40x60 block at a 5mm wall is roughly the cavity footprint x 5mm
+    assert removed > 5000, f"only {removed:.0f} mm3 came out; that is not a floor"
