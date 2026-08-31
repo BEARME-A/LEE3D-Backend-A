@@ -837,3 +837,45 @@ def test_the_open_underside_cut_has_to_overlap_the_cavity():
     assert removed > 0, "a disconnected extension removes nothing — this is that bug"
     # the floor of a 100x40x60 block at a 5mm wall is roughly the cavity footprint x 5mm
     assert removed > 5000, f"only {removed:.0f} mm3 came out; that is not a floor"
+
+
+def test_the_studio_draws_its_cavity_from_the_unclipped_body():
+    """BOTH ENDS. The studio's field hollow grew a wall band against the LEVELLING PLANE, and
+    a wall band against that plane is a floor sealing the underside. It only appeared once the
+    wall was thick enough for the field path to switch on, which is why "turn the thickness up
+    and the underbody stops being hollow" was the shape of the report.
+
+    Measured on the user's own car, his settings, before the fix:
+
+        wall 2.1  field OFF  material up the middle 85.5-86.9           open
+        wall 2.5  field ON   material up the middle 5.0-7.5, 85.2-86.8  FLOOR
+        wall 6.0  field ON   material up the middle 5.0-16.8            FLOOR
+
+    The floor starts at z=5.0, exactly his baseCutZ of 5.017.
+
+    The fix feeds the CAVITY the unclipped body while the outer skin keeps the clipped field.
+    Pinned by reading index.html, because the failure mode of the previous attempt was that it
+    looked right and broke three other tests."""
+    from pathlib import Path
+    root = Path(__file__).resolve().parent.parent.parent
+    idx = None
+    for cand in (root / "LEE3D-Frontend" / "index.html",
+                 root / "LEE3D-Frontend-main" / "index.html"):
+        if cand.exists():
+            idx = cand
+            break
+    if idx is None:
+        pytest.skip("LEE3D-Frontend is not checked out beside this repo")
+    src = idx.read_text(encoding="utf8", errors="ignore")
+    assert "const F=(x,y,z,noCut)=>{" in src, (
+        "the studio's field function no longer offers an unclipped reading, so the cavity has "
+        "nothing to draw from but the levelling plane and the floor will be back")
+    assert "if(noCut) return d;" in src, "the unclipped branch is gone"
+    assert "const bIn = openUnder" in src, (
+        "the cavity is no longer drawn from the unclipped body — the underside will seal "
+        "again at every wall thickness the field path handles")
+    # and the outer term must STILL read the clipped field: that is the invariant the previous
+    # attempt broke, and three guard tests in the studio's own suite caught it.
+    assert "shell[o]=Math.max(b, -(dist+wLoc));" in src, (
+        "the outer surface must still come from `b`. Reading it from the cavity's field moves "
+        "the body's outside and fails the studio's own hollow invariants.")
