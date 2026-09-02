@@ -874,6 +874,15 @@ def test_the_studio_draws_its_cavity_from_the_unclipped_body():
     assert "const bIn = openUnder" in src, (
         "the cavity is no longer drawn from the unclipped body — the underside will seal "
         "again at every wall thickness the field path handles")
+    # The unclipped cavity opens the BASE PLANE only. Ceilings above it — the underside of the
+    # body where it sits over a wheel arch — need the ground-facing ramp, and without it the
+    # studio floors them at every field wall thickness while THIS end opens them. Verified
+    # against the kernel on a real traced car at a 3mm wall: closed leaves material at z 43.1,
+    # 32.1 and 55.1 at three stations, open leaves only the roof.
+    assert "if(openUnder && zm > baseCut + Math.max(wLoc, cell * 2))" in src, (
+        "the studio's arch-ceiling ramp is gone, or its guard no longer keeps clear of the "
+        "base plane — ramping down there lifts the body's floor and fails three of its own "
+        "hollow invariants")
     # and the outer term must STILL read the clipped field: that is the invariant the previous
     # attempt broke, and three guard tests in the studio's own suite caught it.
     assert "shell[o]=Math.max(b, -(dist+wLoc));" in src, (
