@@ -902,3 +902,69 @@ def test_the_studio_draws_its_cavity_from_the_unclipped_body():
     assert "shell[o]=Math.max(b, -(dist+wLoc));" in src, (
         "the outer surface must still come from `b`. Reading it from the cavity's field moves "
         "the body's outside and fails the studio's own hollow invariants.")
+
+
+def test_base_cut_z_finds_the_ground_line_and_declines_when_there_is_none():
+    """A direct port of the studio's `baseCutZ`. It has to agree with the studio, and it has
+    to REFUSE when there is nothing to level — a plain block already stands flat, and cutting
+    it at the mean of its own bottom face would shave the part for no reason.
+
+    On a shape with wheels and arches the lows split into two populations: the parts that
+    reach the ground and the parts that hang in the air. Fewer than 8% of the height between
+    them means one population, and no cut."""
+    # a block: every column bottoms out at the same z, so there is only one population
+    blk = hull.outlines_mm(_block_with([]))
+    assert hull.base_cut_z(blk["side"], 40.0) == float("-inf"), (
+        "a flat-bottomed body has no ground line to find and must not be cut")
+
+    # a silhouette with two feet and a raised belly between them
+    feet = [(0, 0), (30, 0), (30, 20), (70, 20), (70, 0), (100, 0), (100, 60), (0, 60)]
+    z = hull.base_cut_z(feet, 60.0)
+    assert z == pytest.approx(0.0, abs=1e-6), (
+        f"the feet reach z=0 and that is the level the part stands on; got {z}")
+
+    # and it declines on garbage rather than returning a number
+    assert hull.base_cut_z(None, 40.0) == float("-inf")
+    assert hull.base_cut_z([(0, 0), (1, 1)], 40.0) == float("-inf")
+
+
+@pytest.mark.skipif(not HAS_CQ, reason="needs OpenCascade")
+def test_the_exact_body_is_levelled_the_same_way_the_studio_levels_it():
+    # pragma: no cover - needs the kernel
+    """THE SKIRT. This end had no level-base cut at all, so every STEP export carried whatever
+    the trace left below the ground-touching line while the studio's preview showed it clipped
+    flat. On a real traced car that was 5mm of material the user never saw — the exact solid
+    stood 89.0mm against the studio's 83.9mm — and a part that does not sit flat on the bed is
+    precisely what levelling a base is for.
+
+    The silhouette here has two feet at 0.15, a belly raised to 0.5, and ONE narrow column that
+    dips to 0. Without the cut the body's lowest point is that dip; with it the body starts at
+    the feet. Asserting on the dip is what makes this test able to fail — a shape that already
+    stands flat would pass whether or not the cut ran at all."""
+    feet = [[0.00, 0.15], [0.20, 0.15], [0.20, 0.50], [0.40, 0.50],
+            [0.40, 0.15], [0.44, 0.15], [0.44, 0.00], [0.46, 0.00],   # the dip
+            [0.46, 0.15], [0.60, 0.15], [0.60, 0.50], [0.80, 0.50],
+            [0.80, 0.15], [1.00, 0.15], [1.00, 1.00], [0.00, 1.00]]
+    prof = dict(PROFILE)
+    prof["sidePoly"] = feet
+    o = hull.outlines_mm(prof)
+    H = hull.plan(prof)["dims"]["height"]
+    z = hull.base_cut_z(o["side"], H)
+    assert z > 1e-6, f"this silhouette has a clear ground line at 0.15*H; got {z}"
+
+    lowest = min(q[1] for q in o["side"])
+    assert lowest < z - 1.0, (
+        "the fixture must dip BELOW its own ground line or this test cannot fail")
+
+    v = hull.build_solid(prof, hollow=False).val()
+    assert v.BoundingBox().zmin == pytest.approx(z, abs=0.2), (
+        f"the body must be levelled to {z:.3f}; got {v.BoundingBox().zmin:.3f}. "
+        f"Uncut it would reach down to {lowest:.3f}.")
+
+
+def test_a_flat_bottomed_body_is_not_shaved_by_the_levelling():
+    """The guard on the other side. `base_cut_z` returning -inf has to mean NO CUT, not a cut
+    at minus infinity, and a block must come back the height it went in."""
+    blk = _block_with([])
+    p = hull.plan(blk)
+    assert hull.base_cut_z(hull.outlines_mm(blk)["side"], p["dims"]["height"]) == float("-inf")
