@@ -871,7 +871,8 @@ def test_the_studio_draws_its_cavity_from_the_unclipped_body():
         "the studio's field function no longer offers an unclipped reading, so the cavity has "
         "nothing to draw from but the levelling plane and the floor will be back")
     assert "if(noCut) return d;" in src, "the unclipped branch is gone"
-    assert "const bIn = openUnder" in src, (
+    # , not : the floor-band extension below reassigns it.
+    assert "bIn = openUnder ? Math.min(b, F(xm,ym,zm,true)) : b" in src, (
         "the cavity is no longer drawn from the unclipped body — the underside will seal "
         "again at every wall thickness the field path handles")
     # The unclipped cavity opens the BASE PLANE only. Ceilings above it — the underside of the
@@ -883,6 +884,19 @@ def test_the_studio_draws_its_cavity_from_the_unclipped_body():
         "the studio's arch-ceiling ramp is gone, or its guard no longer keeps clear of the "
         "base plane — ramping down there lifts the body's floor and fails three of its own "
         "hollow invariants")
+    # The floor band immediately above the opening needs its own term: the unclipped reading
+    # bottoms out around -4.2mm there, so any wall thicker than that seals the underside.
+    # All three conditions are load-bearing and each was learned by breaking something —
+    # unbounded turns the body into cavity, dropping the normal test hollows the side walls
+    # that hold the bbox floor, and dropping the depth test eats the rim at the opening.
+    assert "bIn = Math.min(bIn, -(zm - baseCut) - wall - cell)" in src, (
+        "the floor-band extension is gone — the underside will seal again above about a "
+        "4.2mm wall")
+    assert "zm < baseCut + wall*2 && -gz/g > 0.35 && bIn < -wall*0.6" in src, (
+        "the floor-band extension's guards have changed. Unbounded turns the whole body into "
+        "cavity; without the normal test the side walls get hollowed and the bbox floor "
+        "lifts; without `bIn < -wall*0.6` it eats the rim and `the rim you see at an opening "
+        "is a clean band, one wall thick` fails")
     # and the outer term must STILL read the clipped field: that is the invariant the previous
     # attempt broke, and three guard tests in the studio's own suite caught it.
     assert "shell[o]=Math.max(b, -(dist+wLoc));" in src, (
