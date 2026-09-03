@@ -310,6 +310,77 @@ def _hollow_wanted(profile: Dict[str, Any]) -> bool:
     return bool(want)
 
 
+def base_cut_z(side_mm: Sequence[Pt] | None, H: float) -> float:
+    """The level the ground-touching parts of the body sit at, or -inf for no cut.
+
+    A DIRECT PORT of `baseCutZ` in the studio's index.html, constants included, because the
+    two ends have to agree about where the bottom of the part is.
+
+    **This end had no level-base cut AT ALL until 2026-08-30.** The studio clipped the body
+    flat and the exact build did not, so every STEP export carried a skirt below the levelled
+    base that the preview never showed — 5mm of real material on a traced car, measured by
+    sampling: 12 of 57 probe points sat inside the solid between z=1.5 and z=4.5, and the
+    solid stood 89.0 tall against the studio's 83.9. A part that does not stand flat on the
+    bed is the exact thing levelling a base is for.
+
+    The method: walk 120 columns across the length, take the LOWEST point of the silhouette in
+    each, then split those lows into two groups with 2-means seeded at the extremes — "reaches
+    the ground" against "hangs in the air", which on a car is the wheels against the arches.
+    If the groups are not separated by at least 8% of the height they are one population and
+    there is nothing to level, so no cut.
+    """
+    if not side_mm or len(side_mm) < 3:
+        return float("-inf")
+    zs = [q[1] for q in side_mm]
+    xs = [q[0] for q in side_mm]
+    z_lo, z_hi, x_lo, x_hi = min(zs), max(zs), min(xs), max(xs)
+    if not (x_hi > x_lo) or not (z_hi > z_lo):
+        return float("-inf")
+
+    def inside(x: float, z: float) -> bool:
+        c = False
+        n = len(side_mm)
+        j = n - 1
+        for i in range(n):
+            xi, zi = side_mm[i]
+            xj, zj = side_mm[j]
+            if ((zi > z) != (zj > z)) and (x < (xj - xi) * (z - zi) / ((zj - zi) or 1e-12) + xi):
+                c = not c
+            j = i
+        return c
+
+    NS, NZ = 120, 160
+    lows: List[float] = []
+    for i in range(NS):
+        x = x_lo + (i + 0.5) / NS * (x_hi - x_lo)
+        for j in range(NZ):
+            z = z_lo + j / NZ * (z_hi - z_lo)
+            if inside(x, z):
+                lows.append(z)
+                break
+    if len(lows) < 4:
+        return float("-inf")
+
+    a, b = min(lows), max(lows)
+    for _ in range(40):
+        sa = na = sb = nb = 0.0
+        for v in lows:
+            if abs(v - a) <= abs(v - b):
+                sa += v; na += 1
+            else:
+                sb += v; nb += 1
+        if not na or not nb:
+            return float("-inf")          # one population only: nothing to separate
+        a2, b2 = sa / na, sb / nb
+        if abs(a2 - a) < 1e-6 and abs(b2 - b) < 1e-6:
+            a, b = a2, b2
+            break
+        a, b = a2, b2
+    if not (b - a > (z_hi - z_lo) * 0.08):
+        return float("-inf")              # the two groups aren't really distinct
+    return a
+
+
 def plan(profile: Dict[str, Any]) -> Dict[str, Any]:
     """
     Everything the exact build is going to do, worked out without touching OpenCascade.
@@ -419,6 +490,26 @@ def build_solid(profile: Dict[str, Any], hollow: bool | None = None,
     front = prism("YZ", o["front"], L * 2.0)      # sweeps along the length
 
     solid = side.intersect(top).intersect(front)
+
+    # LEVEL THE BASE, the way the studio does. Without this the exported part keeps whatever
+    # the trace left below the ground-touching line and will not sit flat on the bed — and the
+    # preview, which DOES level it, disagrees with the file the user prints.
+    base_z = base_cut_z(o["side"], H)
+    if base_z > -1e29 and base_z > 1e-6:
+        pad = max(L, W, H) * 2.0
+        below = (cq.Workplane("XY")
+                 .box(L + 2 * pad, W + 2 * pad, pad, centered=(True, True, False))
+                 .translate((L / 2.0, 0.0, base_z - pad)))
+        try:
+            trimmed = solid.cut(below)
+            if trimmed.solids().vals() and sum(s.Volume() for s in trimmed.solids().vals()) > 1e-6:
+                solid = trimmed
+            else:
+                # Cutting away everything means the cut level was wrong, not that the body is
+                # empty. Keep the untrimmed body rather than hand back nothing.
+                print(f"[hull] level-base cut at {base_z:.3f} emptied the body; leaving it uncut")
+        except Exception as e:
+            print(f"[hull] level-base cut failed ({e!r}); leaving the body uncut")
     if not solid.solids().vals():
         raise ValueError(
             "Those outlines don't overlap into a solid. Every view has to be of the same "
