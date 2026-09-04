@@ -968,3 +968,46 @@ def test_a_flat_bottomed_body_is_not_shaved_by_the_levelling():
     blk = _block_with([])
     p = hull.plan(blk)
     assert hull.base_cut_z(hull.outlines_mm(blk)["side"], p["dims"]["height"]) == float("-inf")
+
+
+def test_scale_is_recorded_without_touching_the_geometry():
+    """A building cannot be expressed as a model dimension alone. An architect works at 1:200
+    and the model size FOLLOWS from the real size; without somewhere to keep the real figure it
+    is lost the moment a model length is typed in.
+
+    `length` remains the MODEL size and every dimension is still built from it, so a profile
+    carrying neither field behaves exactly as it always has. **That is what keeps the car
+    untouched by the construction work**, and it is asserted here rather than assumed."""
+    plain = hull.plan(PROFILE)
+    assert plain["real_dims"] is None and plain["scale_mismatch"] is None, (
+        "a profile with no scale must report none — this is the car's path")
+
+    scaled = hull.plan(dict(PROFILE, modelScale=200))
+    assert scaled["dims"] == plain["dims"], (
+        "the MODEL dimensions must not move when a scale is attached; geometry is built from "
+        "them and attaching a scale is a record, not a transform")
+    L = plain["dims"]["length"]
+    assert scaled["real_dims"]["length"] == pytest.approx(L * 200)
+    assert scaled["real_dims"]["height"] == pytest.approx(plain["dims"]["height"] * 200)
+
+
+def test_a_scale_that_disagrees_with_the_model_size_is_reported_not_resolved():
+    """Given a real length AND a scale, the two can contradict the model length — and then the
+    model is not the scale it claims to be. Report it, the way `unusable_views` and
+    `hollow_failed` are reported. Quietly preferring one of them is exactly how the two ends of
+    this project have gone out of step before."""
+    L = hull.plan(PROFILE)["dims"]["length"]
+
+    ok = hull.plan(dict(PROFILE, modelScale=100, realLength=L * 100))
+    assert ok["scale_mismatch"] is None, "consistent numbers must not raise a false alarm"
+
+    bad = hull.plan(dict(PROFILE, modelScale=100, realLength=L * 250))
+    assert bad["scale_mismatch"] is not None, (
+        "a real length of 250x the model at a claimed 1:100 is a contradiction")
+    assert bad["scale_mismatch"]["implied_length"] == pytest.approx(L * 2.5)
+    assert bad["scale_mismatch"]["model_length"] == pytest.approx(L)
+
+    # and junk in those fields must not throw — a saved profile can carry anything
+    for junk in ("", None, "abc", 0, -5):
+        p = hull.plan(dict(PROFILE, modelScale=junk, realLength=junk))
+        assert p["real_dims"] is None and p["scale_mismatch"] is None
