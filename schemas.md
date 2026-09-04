@@ -1817,9 +1817,45 @@ orthographic projections. The tracer has spent its life fighting perspective in 
    Architects work in NAMED scales — 1:100, 1:200, 1:500 — and the model size follows from the
    real size. Right now the user does that arithmetic in their head and the real dimensions are
    lost. Dylan needs real size in, scale chosen, model size out, and the real figure kept.
-2. **Site assembly at surveyed positions.** Workshop arranges PARTS of one object. Placing
-   several buildings, roads and a fountain at correct relative positions on a site plan is a
-   different job. Needs checking before promising.
+2. **Site assembly — CHECKED 2026-08-30, and it is MUCH smaller than feared.** Workshop
+   already does nearly all of it:
+
+       wsAdd / wsAddMesh / wsAddBox   place any profile, mesh or box as an instance
+       pos{x,y,z}, rot{x,y,z}, scale  full 6-DOF placement plus uniform scale, per instance
+       wsPZ / wsRX / wsRY / wsRZ / wsSC   NUMERIC fields, not drag-only
+       wsGround + drag                 click-drag placement on the ground plane
+       wsExportSTL                     "Export combined STL" — the whole assembly as one file
+       wsSaveAssembly                  the arrangement persists
+       per-instance colour             a complex reads far better with the buildings coloured
+
+   **The one real gap was that there was nothing to place AGAINST. BUILT 2026-08-30.**
+   A plan image now lies on the Workshop floor: choose an image, say how wide it is in real
+   life, say the scale it is drawn at. Its width in the model is `real / scale` — the SAME
+   arithmetic the buildings use, so a building dropped on a spot on the drawing lands at that
+   spot in the model. An 80m plan at 1:200 comes out 400mm across; a 24m building at 1:200
+   comes out 120mm. Neither number is guessed from the image.
+
+   **IT IS SCENE FURNITURE, NOT A PART, and that one choice is the whole safety story.** It
+   lives in `WS.planMesh` and never enters `WS.inst`, which is what all three leak paths walk:
+
+       wsRecomputeExtent   iterates WS.inst -> the plan cannot blow up the grid or the recenter
+       wsPick              iterates WS.inst -> the plan cannot be selected or dragged
+       wsExportSTL         iterates WS.inst -> THE PLAN CAN NEVER REACH A PRINTED FILE
+
+   Adding it as an instance would have been less code and wrong in three places at once. There
+   is a test pinning it — `site plan: the underlay never enters WS.inst` — which reads the
+   source rather than the geometry, because Workshop needs THREE.js and a DOM and cannot be
+   built headlessly. The property that matters is statically checkable and a plan in an
+   exported STL would be printed.
+
+   Also: `renderOrder = -1` and `y = -0.15` so it draws first and sits a hair under the floor
+   grid — parts always render on top and there is no z-fighting.
+
+   **The suite caught a real mobile bug on the way in.** A bare `<input type="file">` fails
+   `mobile: every file picker can actually be opened on a phone` — iOS will not open a picker
+   without a real `<label for=...>` driving it. Fixed before shipping. **278 of 278.**
+
+   Everything else on this item was already written. **Do not rebuild placement.**
 3. **Repeating facade detail.** 153 features already cost about 16s in field mode on a car. A
    facade is windows in rows and could be several hundred. The stamp-vs-field accuracy gap
    (stamp over-removes 2.7x) matters far more when the detail IS the deliverable.
