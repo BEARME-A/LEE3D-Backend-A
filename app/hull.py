@@ -412,8 +412,43 @@ def plan(profile: Dict[str, Any]) -> Dict[str, Any]:
     # difference between the two ends is worse than a loud limitation.
     extra = [v for v in (profile.get("extraViews") or [])
              if isinstance(v, dict) and _clean(v.get("poly"))]
+    # SCALE. `length` is and stays the MODEL size — every dimension above is built from it, so
+    # a profile carrying neither of these behaves exactly as it always has, and the car is
+    # untouched. What these add is somewhere to keep the REAL size, which a model dimension
+    # alone cannot express: an architect works at 1:200 and the model size follows from the
+    # building, not the other way round. Without this the real figure is lost the moment a
+    # model length is typed and nothing downstream can ever recover it.
+    scale = profile.get("modelScale")
+    real_len = profile.get("realLength")
+    try:
+        scale = float(scale) if scale else None
+        real_len = float(real_len) if real_len else None
+    except (TypeError, ValueError):
+        scale = real_len = None
+    real_dims = None
+    scale_mismatch = None
+    # A real length ON ITS OWN is enough: the scale it implies is realLength/L. That is how
+    # somebody working from a drawing would actually think — "this building is 24m, make it
+    # fit" — and letting it derive the scale is better than demanding both. The contract test
+    # caught this: a key the schema says we read has to CHANGE THE ANSWER, and realLength
+    # without modelScale changed nothing at all.
+    if not scale and real_len and real_len > 0 and L > 0:
+        scale = real_len / L
+    if scale and scale > 0:
+        real_dims = {"length": L * scale, "width": W * scale, "height": H * scale}
+        if real_len and real_len > 0:
+            # Both were given, so they can disagree — and a disagreement here means the model
+            # is not the scale it claims. Report it the way unusable_views and hollow_failed
+            # are reported rather than silently preferring one; picking quietly is how the two
+            # ends of this project have gone out of step before.
+            want = real_len / scale
+            if abs(want - L) > max(0.5, L * 0.01):
+                scale_mismatch = {"model_length": L, "implied_length": want,
+                                  "real_length": real_len, "scale": scale}
     return {
         "dims": {"length": L, "width": W, "height": H},
+        "real_dims": real_dims,
+        "scale_mismatch": scale_mismatch,
         "outlines": o,
         "unusable_views": len(extra),
         "through_cuts": cuts,
