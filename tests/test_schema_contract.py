@@ -73,6 +73,12 @@ MUTATE = {
     "topPoly": lambda v: None,
     "frontPoly": lambda v: None,
     "extraViews": lambda v: [{"dir": [0, 1, 1], "poly": [[0, 0], [10, 0], [10, 10]]}],
+    # Numeric, and deliberately tolerant of junk: a saved profile can carry anything in these,
+    # and `plan()` swallowing a string rather than throwing is the wanted behaviour. So the
+    # default "CHANGED" mutation is not a test of whether they are read — it is a test of the
+    # junk guard, which has its own test. Mutate them with real numbers.
+    "modelScale": lambda v: (v or 1) + 199,
+    "realLength": lambda v: (v or 1000) * 7,
 }
 
 # keys that legitimately do not move plan() on a modern profile — see the docstring
