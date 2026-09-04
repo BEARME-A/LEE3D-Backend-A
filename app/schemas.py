@@ -43,6 +43,13 @@ class Profile(BaseModel):
     arcSegments: int = Field(56, ge=8, le=400)
     roofFlatness: float = 1.4
     wallThickness: float = Field(1.8, gt=0)
+    # SCALE. Both optional and neither touches geometry: `length` stays the model size that
+    # everything is built from, so a profile without these behaves exactly as it did. They
+    # exist because a building cannot be expressed as a model dimension alone — an architect
+    # works at 1:100 or 1:200 and the model size FOLLOWS from the real size. Without somewhere
+    # to keep the real figure it is lost the moment the model length is typed in.
+    realLength: Optional[float] = Field(None, gt=0)     # the real thing, in mm. 24m -> 24000
+    modelScale: Optional[float] = Field(None, gt=0)     # denominator: 200 means 1:200
     archLift: float = 1.0
 
     topProfile: List[Point]
