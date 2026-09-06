@@ -84,7 +84,17 @@ MUTATE = {
 # keys that legitimately do not move plan() on a modern profile — see the docstring
 CONDITIONAL = {"sepBottom"}
 REPORTED = {"sidePolyR"}
-ELSEWHERE = {"name"}
+ELSEWHERE = {"name",
+             # A TURNED OBJECT SKIPS plan() ENTIRELY. `build_solid` dispatches on shape=="lathe"
+             # before plan() is reached, because every line below it assumes the body is the
+             # intersection of three silhouettes — the one thing that cannot make a round object
+             # round. So these two are read by the exact build and are invisible to plan(), which
+             # is what this list is for. `shape` itself is NOT here: it is read by the studio and
+             # its x-read-by says so.
+             # "shape" joins them: the exact build reads it (that is the dispatch itself) but
+             # plan() never does, and the default mutation to "CHANGED" is not "lathe" so the
+             # dispatch correctly does not fire. Its x-read-by names both ends truthfully.
+             "shape", "revProfileV", "revHeight"}
 
 
 def test_every_key_the_schema_says_we_read_actually_changes_the_answer():
