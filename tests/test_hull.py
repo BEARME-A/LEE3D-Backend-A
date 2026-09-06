@@ -1011,3 +1011,80 @@ def test_a_scale_that_disagrees_with_the_model_size_is_reported_not_resolved():
     for junk in ("", None, "abc", 0, -5):
         p = hull.plan(dict(PROFILE, modelScale=junk, realLength=junk))
         assert p["real_dims"] is None and p["scale_mismatch"] is None
+
+
+@pytest.mark.skipif(not HAS_CQ, reason="needs OpenCascade")
+def test_a_turned_object_is_revolved_here_not_carved_from_silhouettes():
+    # pragma: no cover - needs the kernel
+    """A VISUAL HULL CANNOT MAKE A ROUND THING ROUND. Measured in the studio on a fountain
+    elevation: 36% out of round — a square is 41% — everywhere the body is narrower than its
+    widest plan circle, because the cross-section there is side-width intersected with
+    front-width. No refinement fixes it.
+
+    The studio grew a lathe first. Without this dispatch a fountain previewed as round would
+    export through the hull and arrive SQUARE — the two ends disagreeing about the whole part,
+    which is the failure this repo keeps being caught by. Here it costs nothing to be exact:
+    `revolve` is what a lathe is."""
+    import math
+    import cadquery as cq        # inside the test: a module-level import would make this file
+                                 # unimportable on the light image and turn the fast gate red
+    H = 100.0
+    # a stepped profile: wide base, narrow stem, wide flange, narrow top
+    prof = []
+    for i in range(49):
+        t = i / 48.0
+        r = 60.0 if t < 0.18 else (26.4 if t < 0.55 else (60.0 if t < 0.72 else 26.4))
+        prof.append([t, r])
+    p = {"shape": "lathe", "revProfileV": prof, "revHeight": H, "length": 120.0,
+         "topProfile": [[0, 100], [1, 100]], "widthProfile": [[0, 60], [1, 60]],
+         "hullHollow": False, "wallThickness": 3.0}
+    v = hull.build_solid(p, hollow=False).val()
+    assert v.isValid() and len(v.Solids()) == 1
+    bb = v.BoundingBox()
+    assert bb.zmin == pytest.approx(0.0, abs=0.5) and bb.zmax == pytest.approx(H, abs=0.5), (
+        f"a turned body stands on the floor at its own height; got z {bb.zmin}..{bb.zmax}. "
+        f"A z span of roughly -H..+H means the revolve axis is wrong — `revolve`'s axis points "
+        f"are in the WORKPLANE's local coordinates, and on XZ world Z is local (0,1,0).")
+
+    # round at a height where the hull would have been square
+    rs = []
+    for a in range(0, 360, 15):
+        r = 0.5
+        while r < 90:
+            if not v.isInside(cq.Vector(r*math.cos(math.radians(a)), r*math.sin(math.radians(a)), 40.0), 1e-6):
+                break
+            r += 0.25
+        rs.append(r)
+    assert max(rs) / min(rs) < 1.02, (
+        f"a turned body must be round: radii {min(rs):.2f}..{max(rs):.2f} at z=40. "
+        f"The hull's answer here was 36% out of round.")
+
+
+@pytest.mark.skipif(not HAS_CQ, reason="needs OpenCascade")
+def test_a_turned_object_hollows_for_printing():
+    # pragma: no cover - needs the kernel
+    """A solid fountain at model scale is a lot of filament and a long print. The cavity is
+    revolved from the same profile pulled in by one wall and stopped one wall short of the top,
+    so the top keeps its thickness and the underside is open — the convention the rest of this
+    file already uses."""
+    prof = [[i/48.0, 60.0 if i/48.0 < 0.5 else 30.0] for i in range(49)]
+    base = {"shape": "lathe", "revProfileV": prof, "revHeight": 100.0, "length": 120.0,
+            "topProfile": [[0, 100], [1, 100]], "widthProfile": [[0, 60], [1, 60]],
+            "wallThickness": 3.0}
+    solid = hull.build_solid(dict(base, hullHollow=False), hollow=False).val().Volume()
+    shell = hull.build_solid(dict(base, hullHollow=True), hollow=True).val().Volume()
+    assert shell < solid * 0.5, (
+        f"hollowing has to remove most of it: {shell/1000:.1f} against {solid/1000:.1f} cm3")
+    assert shell > solid * 0.02, "and it must not remove everything — that is a failed cut"
+
+
+def test_a_lathe_profile_that_is_junk_raises_rather_than_building_nonsense():
+    """A saved profile can carry anything. A turned object with no radius in it has no shape,
+    and returning some default lump would be worse than saying so."""
+    if not HAS_CQ:
+        pytest.skip("needs OpenCascade")
+    for bad in ([], [[0, 0], [1, 0]], [["x", "y"]], None):
+        with pytest.raises(Exception):
+            hull.build_solid({"shape": "lathe", "revProfileV": bad, "revHeight": 100.0,
+                              "length": 120.0, "topProfile": [[0, 100], [1, 100]],
+                              "widthProfile": [[0, 60], [1, 60]]}, hollow=False)
