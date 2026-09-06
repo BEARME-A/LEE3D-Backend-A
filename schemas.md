@@ -1769,10 +1769,33 @@ rather than throwing.
 - The default mutation in that test sets a key to the string `"CHANGED"`, which these fields
   deliberately swallow. They needed numeric entries in `MUTATE`; the junk guard has its own test.
 
-### x-read-by is `[exact]` only, deliberately
-The studio does not read these yet, and the checker verifies the claim against the source. When
-the UI lands, add `studio` to both keys — **and not before**, or the claim becomes a lie the
-checker will catch.
+### THE STUDIO SIDE — shipped 2026-08-30, so scale now works end to end
+"Build it at a scale" sits under the length slider. Off by default, and when it is off **none of
+this code runs at all** — which is what keeps the car exactly as it was. Give the real length in
+metres and the ratio; the model size follows and is shown as you type.
+
+    24m at 1:200 -> 120mm      90m at 1:500 -> 180mm
+
+`S.len` remains the single source of truth for geometry — the scale control only DRIVES it, the
+same way the preset buttons do, so no downstream path changed.
+
+**Out of range, it names the ratio that WOULD fit.** Clamping to 5-600mm and saying "held at
+600mm" tells you it did not work, not what would; the smallest ratio that fits is
+`ceil(real / max)`, and without it somebody guesses denominators until one lands. Checked:
+
+    24m at 1:200  -> 120mm   ok           90m at 1:100  -> 900mm   suggests 1:150 (600mm)
+    120m at 1:200 -> 600mm   ok          250m at 1:200  -> 1250mm  suggests 1:417 (600mm)
+
+**The real figure is saved on the profile, not just used and dropped.** `realLength` and
+`modelScale` are written ONLY when the user asked for a scale, so an ordinary car profile
+carries neither key and is byte-identical to before. Loading a profile with them re-checks the
+box and refills the fields; loading one without clears it.
+
+`x-read-by` is now `["studio","exact"]` on both keys and the checker verifies that against both
+sources — it was `["exact"]` only until the UI existed, deliberately, because the claim would
+otherwise have been a lie the checker catches.
+
+    schema checker clean  |  backend 75 passed, 1 skipped  |  frontend 278 of 278
 
 ### NOT VERIFIED THIS TURN: test_cad
 `tests/test_cad.py` has grown to about 290s and no longer fits in one tool call here (limit
@@ -1851,6 +1874,19 @@ orthographic projections. The tracer has spent its life fighting perspective in 
    Also: `renderOrder = -1` and `y = -0.15` so it draws first and sits a hair under the floor
    grid — parts always render on top and there is no z-fighting.
 
+   **SHARPENED 2026-08-30, before the drawings arrive: the plan can now be ALIGNED.** As first
+   shipped it was pinned centred and unrotated, and a scanned plan is neither — north does not
+   match X and the origin is wherever the scan started. **You cannot place buildings onto a plan
+   you cannot line up**, so it would have blocked on the first real drawing. Now: slide across,
+   slide up the page, turn, and fade.
+
+   **`rotation.order = "YXZ"` is load-bearing.** The plane is laid flat by `rotation.x = -PI/2`
+   and turned by `rotation.y`. On THREE's default XYZ order the Y is applied FIRST, so the turn
+   happens before the plane is flat and tips it out of the floor — the normal comes out at
+   `(sin0, cos0, 0)` instead of straight up. YXZ applies the turn about world-up after the
+   flattening, so it spins in place. Every control routes through one `sync()` that writes its
+   own readout and re-applies, so there is no second copy of the sizing maths to drift.
+
    **The suite caught a real mobile bug on the way in.** A bare `<input type="file">` fails
    `mobile: every file picker can actually be opened on a phone` — iOS will not open a picker
    without a real `<label for=...>` driving it. Fixed before shipping. **278 of 278.**
@@ -1865,6 +1901,55 @@ orthographic projections. The tracer has spent its life fighting perspective in 
 **NOT a gap: terrain.** Correctly deferred. A hillside's top view is just the site boundary and
 its side view is the skyline, so intersecting silhouettes gives a solid block up to the highest
 ridge. Terrain is a heightfield and needs its own builder — do not attempt it inside the hull.
+
+======================================================================
+## ROUND OBJECTS — a lathe about the vertical axis. Built 2026-08-30.
+======================================================================
+_Prompted by an example fountain drawing for the roundabout centre. **A visual hull cannot
+build a fountain**, and the reason is structural rather than a resolution problem._
+
+### THE HULL GETS ROUND OBJECTS WRONG. Measured, on a fountain-shaped elevation with a
+### circular plan:
+
+    base   radius 59.5 to 60.0mm   out of round  1%   round
+    stem   radius 26.4 to 35.8mm   out of round 36%   SQUARE
+    bowl   radius 26.4 to 35.8mm   out of round 36%   SQUARE
+
+36% is all but a square, which is 41%. **The hull only keeps a round object round at its widest
+level**, where the plan circle is the binding constraint. Anywhere it is narrower, the
+cross-section is side-width intersected with front-width — a rectangle. **No grid refinement
+fixes this**; do not try raising quality at it.
+
+### THE FIX: `makeLathe`, and it reuses what was already there
+`makeRevolve` — retired from the UI but kept so old files load — already builds a watertight
+surface of revolution. It turns about X, which suits a wheel; a fountain turns about vertical.
+So the axes are permuted **cyclically, (y,z,x)**, whose determinant is +1, which is why the
+winding `makeRevolve` already fixed stays correct and the solid stays outward-facing. Nothing
+about the revolve maths was rewritten.
+
+`revProfileFromElevation` reads the radius straight off the traced side elevation: at each
+height, half the outline's horizontal span. That is exactly what an elevation of a turned object
+IS, so the drawing needs no special preparation.
+
+    same fountain elevation, through the lathe:
+    tris 5376   boundary edges 0   non-manifold 0   z [0.0, 100.0], base on the floor
+    base 0.00%   stem 0.00%   flange 0.00%   bowl 0.00% out of round
+
+**A first reading said the stem was 127% out of round.** It was a sampling band straddling a
+real diameter step at v=0.55, not a defect — bands kept inside a single segment of the profile
+all read 0.00%. Same class of error as the corner-rounding metric earlier in this file: measure
+across a feature and the feature is what you measure.
+
+    278 of 278
+
+### NOT DONE YET, and deliberately
+- **No UI.** `shape:"lathe"` is reachable from a profile but there is no control for it. Wiring
+  it needs a decision about where it sits beside "follow my drawing" and the smooth loft.
+- **Detecting roundness.** Collin suggested reading "diameter"/"radius" off the drawing. **A
+  circularity test on the TRACED OUTLINE is far more robust than OCR** — the app already has the
+  polygon, and one of his two examples is a hand-annotated survey sheet whose text no OCR would
+  read. Comparing the top outline against a best-fit circle is a few lines and cannot be fooled
+  by handwriting. Text should be a hint at most, never the mechanism.
 
 ======================================================================
 ## OPEN ITEMS
