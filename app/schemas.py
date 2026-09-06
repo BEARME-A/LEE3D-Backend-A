@@ -48,6 +48,12 @@ class Profile(BaseModel):
     # exist because a building cannot be expressed as a model dimension alone — an architect
     # works at 1:100 or 1:200 and the model size FOLLOWS from the real size. Without somewhere
     # to keep the real figure it is lost the moment the model length is typed in.
+    # A TURNED OBJECT. "lathe" revolves the side elevation about the vertical axis — the only
+    # way to build a fountain or a column, because a visual hull comes out 36% out of round
+    # (all but a square) anywhere the body narrows below its widest plan circle.
+    shape: Optional[str] = None
+    revProfileV: Optional[List[List[float]]] = None     # [[height fraction, radius mm], …]
+    revHeight: Optional[float] = Field(None, gt=0)      # tall, in mm — NOT length, which is the diameter
     realLength: Optional[float] = Field(None, gt=0)     # the real thing, in mm. 24m -> 24000
     modelScale: Optional[float] = Field(None, gt=0)     # denominator: 200 means 1:200
     archLift: float = 1.0
