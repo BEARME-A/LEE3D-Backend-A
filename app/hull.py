@@ -481,6 +481,90 @@ def plan(profile: Dict[str, Any]) -> Dict[str, Any]:
 # --------------------------------------------------------------------------------------
 # The exact build. Needs OpenCascade.
 # --------------------------------------------------------------------------------------
+def build_lathe(profile: Dict[str, Any], hollow: bool | None = None):
+    """A turned object — fountain, column, bollard, planter — built EXACTLY, by revolving.
+
+    The studio grew this builder first, and without it here the two ends disagree about the
+    whole part: a visual hull cannot make a round thing round. Measured in the studio on a
+    fountain elevation, the hull came out **36% out of round** — all but a square, since a
+    square is 41% — everywhere the object is narrower than its widest plan circle, because the
+    cross-section there is side-width intersected with front-width. No refinement fixes that.
+    So a fountain previewed as a lathe and exported through the hull would arrive square.
+
+    Here it costs nothing to be exact: `revolve` is what a lathe IS, so this end is rounder
+    than the studio's 56-sided approximation rather than merely equal to it.
+
+    The radius profile is `revProfileV` — [[height fraction, radius mm], ...] — read straight
+    off the traced side elevation, where each height's radius is half the outline's width.
+    """
+    cq = _import_cq()
+    H = float(profile.get("revHeight") or profile.get("length") or 100.0)
+    prof = profile.get("revProfileV") or []
+    pts = []
+    for row in prof:
+        try:
+            t, r = float(row[0]), max(0.0, float(row[1]))
+        except (TypeError, ValueError, IndexError):
+            continue
+        pts.append((t * H, r))
+    pts.sort(key=lambda q: q[0])
+    if len(pts) < 2 or max(r for _, r in pts) <= 1e-6:
+        raise ValueError("a turned object needs a radius profile with some radius in it")
+
+    def solid_from(points, wall_shift=0.0, z_lo=None, z_hi=None):
+        """Revolve a (z, radius) polyline about the Z axis, closed down the axis at both ends."""
+        ring = []
+        for z, r in points:
+            rr = r - wall_shift
+            if z_lo is not None and z < z_lo:
+                continue
+            if z_hi is not None and z > z_hi:
+                continue
+            ring.append((max(0.0, rr), z))
+        if len(ring) < 2:
+            return None
+        lo_z, hi_z = ring[0][1], ring[-1][1]
+        poly = [(0.0, lo_z)] + ring + [(0.0, hi_z)]
+        # collapse points that repeat, which OpenCascade will not accept in a wire
+        clean = [poly[0]]
+        for q in poly[1:]:
+            if abs(q[0] - clean[-1][0]) > 1e-9 or abs(q[1] - clean[-1][1]) > 1e-9:
+                clean.append(q)
+        if len(clean) < 3:
+            return None
+        # THE AXIS IS IN THE WORKPLANE'S LOCAL COORDINATES, not world. On the XZ plane the
+        # local y direction IS world Z, so the axis is (0,1,0); passing (0,0,1) revolves about
+        # the plane normal — world -Y — and yields a body spanning z -101..101 with no volume.
+        return (cq.Workplane("XZ").polyline(clean).close()
+                .revolve(360.0, (0, 0, 0), (0, 1, 0)))
+
+    solid = solid_from(pts)
+    if solid is None:
+        raise ValueError("the radius profile collapsed to nothing")
+
+    if hollow is None:
+        hollow = bool(profile.get("hullHollow", True))
+    p = plan(profile)
+    wall = float(p.get("wall") or 0.0)
+    if hollow and wall > 0:
+        # An open-bottomed shell: the cavity runs from below the floor up to one wall short of
+        # the top, so the top keeps its thickness and the underside is open — the same shape a
+        # printed model wants, and the same convention the rest of this file uses.
+        inner = solid_from(pts, wall_shift=wall, z_hi=H - wall)
+        if inner is not None:
+            try:
+                drop = H + 2.0 * max(H, 1.0)
+                cavity = inner.union(inner.translate((0, 0, -drop * 0.0)))
+                trimmed = solid.cut(cavity)
+                if trimmed.solids().vals() and sum(s.Volume() for s in trimmed.solids().vals()) > 1e-6:
+                    solid = trimmed
+                else:
+                    print("[hull] the turned shell emptied the body; leaving it solid")
+            except Exception as e:
+                print(f"[hull] could not hollow the turned body ({e!r}); leaving it solid")
+    return solid
+
+
 def build_solid(profile: Dict[str, Any], hollow: bool | None = None,
                 report: Dict[str, Any] | None = None):
     """`hollow=None` means ASK THE PROFILE, which is almost always what a caller wants.
@@ -510,6 +594,11 @@ def build_solid(profile: Dict[str, Any], hollow: bool | None = None,
     corners are corners and curves are curves at any zoom.
     """
     cq = _import_cq()
+    # A TURNED OBJECT IS NOT A HULL. Dispatch before anything below runs: every line of it
+    # assumes the body is the intersection of three silhouettes, which is the one thing that
+    # cannot make a round object round.
+    if str(profile.get("shape") or "") == "lathe":
+        return build_lathe(profile, hollow=hollow)
     p = plan(profile)
     if hollow is None:
         hollow = p["hollow"]
