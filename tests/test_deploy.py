@@ -232,3 +232,38 @@ def test_the_endpoint_says_when_it_could_not_actually_hollow(monkeypatch):
     r3 = c.post("/solid", json={**prof, "hullHollow": False})
     assert r3.headers.get("X-LEE3D-Hollow-Failed") == "0", (
         "an absent report is not a failure — 0 covers both 'worked' and 'never asked'")
+
+
+def test_the_plan_reports_what_the_model_stands_for(monkeypatch):
+    """`dims` is the MODEL, which is what gets printed. A profile can also carry the REAL size
+    and the scale it is built at, and without surfacing them the scale is computed here and
+    thrown away — nothing downstream could tell a 120mm building at 1:200 from a 120mm one at
+    1:100, which is the entire point of keeping the real figure.
+
+    And a real length can contradict the model length, in which case the model is not the scale
+    it claims to be. That is reported, never resolved here — the same treatment `unusable_views`
+    and `hollow_failed` get, and for the same reason."""
+    from fastapi.testclient import TestClient
+    from app.main import app
+    c = TestClient(app)
+    prof = {
+        "name": "t", "length": 120.0,
+        "topProfile": [[0, 60]], "bottomProfile": [[0, 0]], "widthProfile": [[0, 25]],
+        "sidePoly": [[0, 0], [1, 0], [1, 1], [0, 1]],
+        "topPoly": [[0, 0], [1, 0], [1, 1], [0, 1]],
+        "frontPoly": [[0, 0], [1, 0], [1, 1], [0, 1]],
+        "wallThickness": 3.0,
+    }
+    plain = c.post("/solid?plan_only=true", json=prof).json()
+    assert plain["real_dims"] is None and plain["scale_mismatch"] is None, (
+        "a profile with no scale reports none — this is every car's path")
+
+    scaled = c.post("/solid?plan_only=true", json={**prof, "modelScale": 200}).json()
+    assert scaled["dims"] == plain["dims"], "the model dimensions must not move"
+    assert scaled["real_dims"]["length"] == pytest.approx(plain["dims"]["length"] * 200)
+
+    bad = c.post("/solid?plan_only=true",
+                 json={**prof, "modelScale": 100, "realLength": 120.0 * 250}).json()
+    assert bad["scale_mismatch"] is not None, (
+        "a real length 250x the model at a claimed 1:100 contradicts itself and must be said")
+    assert bad["scale_mismatch"]["implied_length"] == pytest.approx(300.0)
