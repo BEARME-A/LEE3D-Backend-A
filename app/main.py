@@ -159,6 +159,14 @@ def solid(
             # the studio can carve from silhouettes at any angle; this build intersects the
             # three axis outlines only, so it would come out FATTER. Say so.
             "unusable_views": p["unusable_views"],
+            # SCALE. `dims` is the MODEL, which is what gets printed; these say what the model
+            # stands for. Without them the scale a profile carries is computed here and thrown
+            # away, and nothing downstream can tell a 120mm building at 1:200 from a 120mm one
+            # at 1:100 — which is the whole point of keeping the real figure.
+            "real_dims": p.get("real_dims"),
+            # A real length and a scale can contradict the model length, and then the model is
+            # not the scale it claims. Reported the way unusable_views is, never resolved here.
+            "scale_mismatch": p.get("scale_mismatch"),
             "hollow": hollow,
             "wall": p["wall"],
             "ignored_second_side": p["ignored_second_side"],
