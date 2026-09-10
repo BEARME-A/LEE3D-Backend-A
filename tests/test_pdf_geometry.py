@@ -89,3 +89,66 @@ def test_it_refuses_to_pick_a_scale_when_the_sheet_gives_two():
 def test_a_page_that_does_not_exist_is_a_clear_error_not_a_crash():
     with pytest.raises(ValueError):
         extract_geometry(_plan(), page_index=7)
+
+
+# =====================================================================================
+# IMPERIAL. American construction documents are dimensioned in feet and inches and scaled
+# architecturally. None of the metric reading above sees any of it, and Dylan's real set —
+# Saratoga Springs / Cathedral Oak Parkway — is entirely imperial. These are the actual
+# strings off those sheets, not invented ones.
+# =====================================================================================
+def test_feet_and_inches_are_read_as_written_on_the_sheet():
+    from app.pdf_import import parse_feet_inches as f
+    assert f("4'-0\"") == pytest.approx(1219.2)      # main column width
+    assert f("12'-4\"") == pytest.approx(3759.2)     # main column height
+    assert f("23'-0\"") == pytest.approx(7010.4)     # community sign
+    assert f("16'-0\"") == pytest.approx(4876.8)     # wayfinding sign, maximum height
+    assert f("2'-10\"") == pytest.approx(863.6)
+    assert f("7\"") == pytest.approx(177.8)
+    assert f("1/2\"") == pytest.approx(12.7)         # polymetal thickness
+    assert f("3/8\"") == pytest.approx(9.525)        # raked joints
+    assert f("1-1/2\"") == pytest.approx(38.1)       # sign lettering thickness
+    assert f("4-1/2\"") == pytest.approx(114.3)      # community logo thickness
+
+
+def test_a_vulgar_fraction_sits_after_its_whole_number():
+    """42'-1¾" is off the wayfinding sign detail, and it broke the first version of this.
+
+    A vulgar fraction follows its whole number (1¾) while a written one follows a hyphen
+    (1-1/2). One regex trying to hold both orderings matched neither, and returned None on a
+    real dimension — which reads as "no dimension there" rather than as a parser fault."""
+    from app.pdf_import import parse_feet_inches as f
+    assert f("42'-1¾\"") == pytest.approx(12846.05)
+    assert f("1¾\"") == pytest.approx(44.45)
+    assert f("1-1/2\"") == pytest.approx(38.1)
+    assert f("3/8\"") == pytest.approx(9.525)
+
+
+def test_a_dimension_it_cannot_read_returns_nothing_rather_than_a_guess():
+    """A wrong dimension read confidently is worse than none: it gets built."""
+    from app.pdf_import import parse_feet_inches as f
+    for junk in (None, "", "   ", "HELLO", "'", '"', "-", "NOT TO SCALE"):
+        assert f(junk) is None, f"{junk!r} must not parse to a number"
+
+
+def test_architectural_scales_come_back_in_the_same_form_as_metric_ones():
+    """1/4" = 1'-0" is 1:48. Returned as a plain denominator so a caller never has to know
+    which notation the sheet used — the same shape `detect_plot_scale` already returns."""
+    from app.pdf_import import parse_arch_scale as a
+    assert a("1\" = 20'-0\"") == pytest.approx(240)    # L201B site layout, L301B grading
+    assert a("1/4\" = 1'-0\"") == pytest.approx(48)    # the column and section details
+    assert a("3/8\" = 1'-0\"") == pytest.approx(32)    # wayfinding sign
+    assert a("1/8\" = 1'-0\"") == pytest.approx(96)    # monument cross-section
+    assert a("SCALE: 1\" = 20'-0\"") == pytest.approx(240)
+    assert a("nonsense") is None and a("") is None
+
+
+def test_the_sheet_scale_is_found_whichever_notation_it_is_printed_in():
+    from app.pdf_import import detect_plot_scale
+    w = lambda t: {"text": t, "x": 0.0, "y": 0.0}
+    assert detect_plot_scale([w("1:200")]) == pytest.approx(200)
+    assert detect_plot_scale([w("SCALE:"), w("1\" = 20'-0\"")]) == pytest.approx(240)
+    # broken into separate runs, which is how a plotted sheet actually arrives
+    assert detect_plot_scale([w("1/4\""), w("="), w("1'-0\"")]) == pytest.approx(48)
+    # two different scales on one sheet is genuinely ambiguous: say nothing
+    assert detect_plot_scale([w("1:200"), w("1/4\" = 1'-0\"")]) is None
