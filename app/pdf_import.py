@@ -158,6 +158,112 @@ def _is_number(t: str) -> bool:
         return False
 
 
+# ----------------------------------------------------------------------------------------
+# IMPERIAL. American construction documents are dimensioned in feet and inches and scaled
+# architecturally — 1/4" = 1'-0", not 1:48 — and none of the metric reading below sees any of
+# it. Dylan's set is entirely imperial: 4'-0" columns, a 12'-4" height, sheets at 1"=20'-0",
+# 1/4"=1'-0", 3/8"=1'-0" and 1/8"=1'-0". Read from the sheet rather than typed in again,
+# for the same reason the metric ratio is: the drawing is the document, and retyping a
+# dimension is one more chance to disagree with it.
+# ----------------------------------------------------------------------------------------
+_VULGAR = {"¼": 0.25, "½": 0.5, "¾": 0.75, "⅛": 0.125, "⅜": 0.375, "⅝": 0.625, "⅞": 0.875,
+           "⅓": 1/3, "⅔": 2/3}
+MM_PER_IN = 25.4
+
+_INCH_RE = re.compile(
+    r"^\s*(?:(?P<whole>\d+(?:\.\d+)?)\s*)?"          # 4, or the 1 in 1-1/2 and in 1¾
+    r"(?:[-\s]\s*)?"
+    r"(?:(?P<num>\d+)\s*/\s*(?P<den>\d+))?"          # 1/2, 3/8
+    r"\s*(?P<vul>[¼½¾⅛⅜⅝⅞⅓⅔])?\s*$")                 # ¾ — comes AFTER the whole number
+
+
+def _inches(text: str) -> Optional[float]:
+    """The inch part of a dimension: 4, 1-1/2, 3/8, 1¾, 10, or empty.
+
+    Split out from the feet rather than matched in one pattern, because a vulgar fraction sits
+    AFTER its whole number (1¾) while a written fraction sits after a hyphen (1-1/2), and one
+    regex trying to hold both orderings silently failed on 42'-1¾" — a real dimension off the
+    wayfinding sign detail.
+    """
+    t = (text or "").strip().rstrip('"').strip()
+    if t == "":
+        return 0.0
+    m = _INCH_RE.match(t)
+    if not m:
+        return None
+    g = m.groupdict()
+    if not any(g.values()):
+        return None
+    v = float(g["whole"]) if g["whole"] else 0.0
+    if g["num"] and g["den"] and float(g["den"]) != 0:
+        v += float(g["num"]) / float(g["den"])
+    if g["vul"]:
+        v += _VULGAR[g["vul"]]
+    return v
+
+
+def parse_feet_inches(text: str) -> Optional[float]:
+    """A dimension as written on an American drawing, in MILLIMETRES.
+
+    Handles 4'-0", 12'-4", 2'-10", 7", 1/2", 3/8", 1-1/2", 4-1/2" and the vulgar fractions a
+    CAD title block emits (42'-1¾"). Returns None rather than a guess for anything it does not
+    recognise, because a wrong dimension read confidently is worse than none — it gets built.
+    """
+    if text is None:
+        return None
+    t = str(text).strip().replace("’", "'").replace("”", '"')
+    if not t or t in ("'", '"', "-"):
+        return None
+    ft = 0.0
+    if "'" in t:
+        head, _, tail = t.partition("'")
+        head = head.strip()
+        try:
+            ft = float(head)
+        except ValueError:
+            return None
+        rest = tail.strip().lstrip("-").strip()
+    else:
+        rest = t
+        if not any(c.isdigit() for c in rest):
+            return None
+    inches = _inches(rest)
+    if inches is None:
+        return None
+    return round((ft * 12.0 + inches) * MM_PER_IN, 6)
+
+
+_ARCH_SCALE_RE = re.compile(r"^(?P<lhs>[^=]+?)\s*=\s*(?P<rhs>.+)$")
+
+
+def parse_arch_scale(text: str) -> Optional[float]:
+    """An architectural scale as printed — 1/4" = 1'-0" — as a plain ratio denominator.
+
+    1/4" = 1'-0"  ->  48       one paper inch stands for four real feet
+    1"   = 20'-0" ->  240
+    3/8" = 1'-0"  ->  32
+    1/8" = 1'-0"  ->  96
+
+    Same units both sides, so the ratio is just real over paper. Returned in the SAME form as
+    the metric reader's, so a caller never has to know which notation the sheet used.
+    """
+    if not text:
+        return None
+    t = str(text).strip()
+    for lead in ("SCALE:", "SCALE"):
+        if t.upper().startswith(lead):
+            t = t[len(lead):].strip()
+    m = _ARCH_SCALE_RE.match(t)
+    if not m:
+        return None
+    paper = parse_feet_inches(m.group("lhs"))
+    real = parse_feet_inches(m.group("rhs"))
+    if not paper or not real or paper <= 0 or real <= 0:
+        return None
+    ratio = real / paper
+    return ratio if 1.0 <= ratio <= 20000.0 else None
+
+
 _SCALE_RE = re.compile(r"^1\s*[:/]\s*(\d{1,6})$")
 
 
@@ -175,10 +281,22 @@ def detect_plot_scale(words) -> Optional[float]:
         if m:
             found.add(int(m.group(1)))
             continue
+        # ARCHITECTURAL, e.g. 1/4" = 1'-0". A word run may hold the whole thing or just the
+        # start of it, so try this word and the few after it — a plotted sheet breaks
+        # `1/4" = 1'-0"` into separate runs as readily as it breaks `SCALE 1 : 200`.
+        for span in (1, 2, 3, 4, 5):
+            a = parse_arch_scale(" ".join(x["text"] for x in words[i:i + span]))
+            if a:
+                found.add(int(round(a)))
+                break
         # "SCALE 1 : 200" arrives as separate runs
         if w["text"].strip().upper() in ("SCALE", "SCALE:"):
             tail = "".join(x["text"] for x in words[i + 1:i + 4])
             m2 = _SCALE_RE.match(tail.strip())
             if m2:
                 found.add(int(m2.group(1)))
+            else:
+                a = parse_arch_scale(tail)
+                if a:
+                    found.add(int(round(a)))
     return float(found.pop()) if len(found) == 1 else None
