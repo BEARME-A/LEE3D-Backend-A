@@ -751,6 +751,23 @@ see the app, click anything, or judge how something reads. Everything below is v
 far as code and numbers go, and unverified as far as a person using it goes. Tick items off
 and delete them once confirmed._
 
+**0c. Worth a glance in Workshop at your car with its bottom plate — if it sits half a length
+off, that's the thing I couldn't test.** (added 2026-08-30, at Collin's request)
+   - `makeBottom` lays the plate at `x=(xf-0.5)*L`, so -L/2..L/2. The projection body measures
+     x[0, L]. **That is an offset of half the model's length**, and it is arithmetic off one
+     unambiguous line plus a measurement, not a guess. The smooth builder is centred, which is
+     why it lines up there and this went unseen.
+   - The studio has always refused a separate bottom in projection mode. **Workshop never knew
+     the rule** and only checked `sepBottom!==false`, so a traced car profile — projection with
+     `sepBottom:true`, which is what his are — got the offset plate. Workshop now applies the
+     same rule, so the plate should simply be absent rather than misplaced.
+   - **What needs his eyes:** whether a car in Workshop LOST something it should have kept. If
+     the plate was visibly there and correct, the arithmetic above is wrong somewhere and this
+     change should be reverted. If it was absent or plainly floating, this is done.
+   - I could not run this myself: `makeBottom` closes over a module-level `loftBase` and cannot
+     be extracted standalone by the test harness. Adding it to NAMES makes the extraction
+     succeed and the CALL throw, which is a trap — it was backed out.
+
 **0a. The thing in the middle of the car — ANSWERED 2026-08-30. NOT A BUG. CLOSED.**
    - Collin: **connected up to the cabin.** That is material above an open wheel arch, which is
      correct geometry and looks exactly like a floating shelf from the side. There is no plank
@@ -1646,17 +1663,29 @@ including the plank work, which is fine, but a field-vs-stamp comparison that do
        studio "cut into the shape"  (field)    removed 1.34%
        backend, the exact kernel                removed 1.19%
 
-   **Field agrees with the STEP export to within 13%. Stamp over-removes by about 2.7x.** His
-   profile is saved as `carveMode:"stamp"`, so the preview has been showing more material gone
-   than the export actually removes — the two ends disagree about the part, which is the one
-   thing this project does not tolerate quietly.
+   **CORRECTED 2026-08-30: this is a PREVIEW choice, not a fidelity one, and the earlier
+   framing here was misleading.** `carveMode` is studio-only — the schema says so
+   (`x-read-by: ["studio"]`) and the exact build was measured ignoring it outright:
 
-   That inverts the earlier reading of this question. Stamp looked better only because field
-   was tearing at every pocket rim, and **that is fixed** (2530 -> 465 torn edges). Field is now
-   both the accurate path and a clean one, which is also what Collin guessed when he said the
-   default should be cutting into the model. **Still not changed here** — it costs build time
-   (field is the slow path) and the decision is his, but the trade is no longer a matter of
-   taste.
+       backend with carveMode=stamp  ->  88.654 cm3
+       backend with carveMode=field  ->  88.654 cm3
+       backend with carveMode absent ->  88.654 cm3
+
+   **The STEP export is byte-for-byte the same part either way.** So "stamp over-removes by
+   2.7x" is the PREVIEW overstating how much material is gone, not a wrong part — and the field
+   path's 86 badly-wound edges are a preview artefact too, not something that reaches a print.
+   The earlier wording implied the two ends disagreed about the object. They do not.
+
+   **The trade, stated properly, is about which preview lies less about a part neither one
+   changes:**
+
+       field  geometrically closer to the export (1.34% of the body removed against the
+              kernel's 1.19%), but 86 badly-wound edges and rims that tore until the repair
+              (2530 -> 465). The slow path, 15.5s against 7.5s on his car.
+       stamp  a clean mesh — 0 badly-wound edges — but shows about 2.7x the material gone.
+
+   Neither affects what gets printed. **Still not changed here**, and the decision is Collin's,
+   but it is a smaller decision than this file previously made it sound.
 
 5. **THE 22% VOLUME GAP — split, and it is TWO separate things. 2026-08-30.**
 
@@ -1806,6 +1835,137 @@ such limit and will run it.** Worth knowing that the level-base cut pushed this 
 to ~4:50 — it is now the slowest thing in the repo.
 
 ======================================================================
+## READING A DRAWING FILE — the backend already had most of it. 2026-08-30.
+======================================================================
+_Collin: a file should be read properly without manual input; tracing and manual boxes keep
+their place for PICTURES, but words, measurements and gradings should be read, not retyped._
+
+### CHECK BEFORE BUILDING PAID AGAIN — `app/pdf_import.py` ALREADY EXISTS
+    render_pages()      PDF -> page images at a chosen dpi, which is the tracing path
+    extract_geometry()  line work, callouts and page size from a plotted page. Beziers are
+                        flattened (`_bezier`) because curves are most of a site plan — kerb
+                        returns, arcs, the roundabout itself
+    detect_plot_scale() reads the ratio printed on the sheet
+    endpoints           /import/pdf and /import/pdf/geometry, already wired
+**PyMuPDF 1.24.7 is already in requirements.txt.** Nothing needed installing and nothing needed
+writing from scratch. **Do not build a second importer.**
+
+### THE ACTUAL GAP WAS IMPERIAL, and it was total
+`_SCALE_RE` is `^1[:/](\d+)$` — metric ratios only. **Dylan's entire set is imperial**: sheets
+at 1"=20'-0", 1/4"=1'-0", 3/8"=1'-0", 1/8"=1'-0", and dimensions like 4'-0", 12'-4", 23'-0",
+1-1/2", 3/8". Not one of those would have been read. The importer would have opened his
+drawings and found no scale and no dimensions at all.
+
+    parse_feet_inches()  a dimension as written -> MILLIMETRES
+    parse_arch_scale()   1/4" = 1'-0"  ->  48, in the SAME form the metric reader returns, so
+                         no caller has to know which notation the sheet used
+    detect_plot_scale()  now tries both, including across separate word runs
+
+    4'-0"    -> 1219.2      1/4" = 1'-0"  -> 1:48
+    12'-4"   -> 3759.2      3/8" = 1'-0"  -> 1:32
+    23'-0"   -> 7010.4      1/8" = 1'-0"  -> 1:96
+    1-1/2"   -> 38.1        1"   = 20'-0" -> 1:240
+    42'-1¾"  -> 12846.05
+
+**Junk returns None, never a number.** A dimension read wrongly but confidently is worse than
+one not read: it gets built.
+
+**A VULGAR FRACTION SITS AFTER ITS WHOLE NUMBER (1¾) WHILE A WRITTEN ONE FOLLOWS A HYPHEN
+(1-1/2).** One regex trying to hold both orderings matched neither and returned None on
+42'-1¾" — a real dimension off the wayfinding sign detail — which reads as "no dimension there"
+rather than as a parser fault. The inch part is now parsed separately from the feet. There is a
+test named for exactly that string, and it is mutation-checked.
+
+    84 passed, 1 skipped  |  schema checker clean
+
+### WHAT IS STILL MANUAL, AND WHAT SHOULD STAY THAT WAY
+Collin's line is the right one: **manual input for PICTURES, never for information.** So the
+tracing tools and the box tool keep their place for a photograph or a rendering, and nothing
+that is written on a drawing — a scale, a dimension, a grade, a material code — should ever be
+typed in twice. Reading it is not a convenience; retyping is a second chance to disagree with
+the document.
+
+**Not yet read, in the order they are worth doing:**
+1. **Associating a dimension with the geometry it dimensions.** `extract_geometry` gives the
+   line work and `parse_feet_inches` gives the number; nothing yet says WHICH line the 4'-0"
+   belongs to. A dimension is drawn as its own primitives — witness lines, arrowheads, a text
+   run — near what it measures. That proximity is the link, and it is the next real piece.
+2. **The Northing/Easting schedule.** A table of survey points is placement data and is already
+   reduced by hand in the section above; parsing the table is straightforward once text runs
+   carry positions, which they do.
+3. **Sheet identity from the title block** — sheet number, title, project, revision. Cheap, and
+   it is what tells the app whether it is looking at a plan or a detail.
+4. **The materials schedule.** A bill of materials, not geometry. Carry it as metadata on a
+   profile; never try to derive a shape from it.
+
+======================================================================
+## DYLAN'S REAL DRAWINGS — ingested 2026-08-30. What they are and what to do with them.
+======================================================================
+_ELM Studio, **SARATOGA SPRINGS / CATHEDRAL OAK PARKWAY**, Green Cove Springs FL, for SRTG DEV
+Owner LLC. Landscape/hardscape construction documents, permit set. Structural by Keister Webb.
+Eleven sheets, photographed from a phone. **Every number below is read off a photo and must be
+confirmed against the PDF before anything is built from it.**_
+
+### THE SHEETS
+    L201B  SITE LAYOUT PLAN (2 of 8), 1"=20'-0"  roundabout + NORTHING/EASTING POINT SCHEDULE
+    L301B  SITE GRADING PLAN, 1"=20'-0"          same roundabout, limits of work, sight windows
+    L403   HARDSCAPE DETAILS, 1/8"=1'-0"         West Primary Project Monument CROSS-SECTION
+    L404   HARDSCAPE DETAILS                     monument front/left elevation, column sections
+                                                 1-4, column layout plan, wall section, LOGO,
+                                                 COMMUNITY SIGN
+    L406?  MAIN COLUMN front/side elevation, cross-sections 1-5, SIGN COLUMN rear elevation
+    L40x   STRUCTURAL NOTES & DETAILS            10 typical footing/bond-beam/joint details
+    (n/a)  GENERAL NOTES                         codes, loads, concrete, masonry
+    (n/a)  MATERIALS SCHEDULE                    signage, fences, masonry, electrical
+    (n/a)  MASTER SITE PLAN (ETM/Freehold)       4,325 lots over 5 phases, 24.88 commercial ac
+
+### THE OBJECTS TO MODEL, with their real sizes
+    MAIN COLUMN            4'-0" square, 12'-4" tall, stone veneer on 8x8x16 CMU, 8"x4" stone cap
+    COMMUNITY SIGN         23'-0" x 4'-0", halo-lit aluminium letters on a COR-TEN cabinet
+    WAYFINDING SIGN        max height 16'-0", 7'-0" min / 8'-0" max to grade, 4" sq tubular post,
+                           1/2" double-faced polymetal, footings 3'-0" and 4'-0" deep
+    MONUMENT WALL          arcs between the columns, stone veneer on CMU
+    LOGO                   4-1/2" thick reverse-lit aluminium channel, COR-TEN
+
+### THE SURVEY SCHEDULE IS A PLACEMENT DATASET, and it is already usable
+Ten points with Northing/Easting to four decimals. Reduced to local feet from point 21:
+
+    21 column CL          x   +0.000   y   +0.000      27 column CL      x  +49.297  y  -12.431
+    22 wall CL/col int    x   -0.203   y   +1.325      26 wall CL/col    x  +50.088  y  -11.385
+    24 wall CL/col int    x   +0.071   y   -1.315      23/25/29 are wall arc RADIUS CENTRES
+
+    columns 21 -> 27:  50.84 ft apart, bearing 104.15 deg from north = 15,496 mm full size
+    wall arc radii:    16.330 ft, 14.589 ft, 12.338 ft  (4977 / 4447 / 3761 mm)
+    the two wayfinding signs are 327.11 ft apart (99.7 m)
+
+**At 1:50 the monument is 310mm across — inside the app's 5-600mm build range.** 1:100 gives
+155mm, 1:200 gives 77mm. The scale feature shipped earlier takes exactly this: real size in,
+ratio chosen, model size out.
+
+### THE ONE THING THAT MATTERS MOST: **GET THE VECTOR PDF**
+These sheets are CAD output. **A PDF carries the geometry as lines, arcs and placed text with
+coordinates; a photograph carries none of it.** The difference is not marginal — with the PDF a
+roundabout island is an arc with a radius, and from a photo it is grey pixels that no OCR will
+turn back into a radius. One of these sheets is a hand-annotated survey; another is a 1"=20'
+site plan whose text is under a millimetre tall on screen.
+
+**And the app already has an SVG import path** (`svgPhysicalWidthMM`, `svgDetailAt`,
+`libCanonical`). PDF -> SVG is a standard conversion. That is the road in, and it is much
+shorter than anything starting from images.
+
+### SCOPE, in the order that pays
+1. **L404 and L406 first — the column, the sign, the wall.** They are the objects Dylan wants
+   modelled, they are drawn at 1/4"=1'-0" so the geometry is large and clean, and each is a
+   single object the existing builders can already make: a column is an extrusion, the wall is
+   an arc sweep, the logo is a lathe.
+2. **Then L201B's point schedule for placement**, which is already reduced above.
+3. **The master plan is CONTEXT, not geometry.** 4,325 lots is not a model; it is the site-plan
+   underlay behind everything else.
+4. **The materials schedule and general notes are not geometry at all.** They are a bill of
+   materials and a code compliance record — worth carrying as metadata on a profile, never
+   worth trying to derive shape from.
+
+======================================================================
 ## LANDSCAPE / CONSTRUCTION BUILD — scoping for Dylan (PM). 2026-08-30
 ======================================================================
 _Buildings and structures, some site layout (plots, roads, services), and objects like an
@@ -1903,6 +2063,99 @@ its side view is the skyline, so intersecting silhouettes gives a solid block up
 ridge. Terrain is a heightfield and needs its own builder — do not attempt it inside the hull.
 
 ======================================================================
+## "CUT INTO THE SHAPE" LEAVES 86 BADLY-WOUND EDGES AND 4 PINCHED FRAGMENTS
+======================================================================
+_Found 2026-08-30 by running the winding check the pole-fan bug suggested, across every builder
+before adding it as a test. **Not fixed. Do not ship a guess at it.**_
+
+    hull, his car (stamp)     81434 tris   same-way edges    0   ok
+    hull, his car (FIELD)     84614 tris   same-way edges   86   INCONSISTENT
+    hull, no features         81506 tris   same-way edges    0   ok
+    smooth loft                                              0   ok
+    lathe / revolve (fixed)                                  0   ok
+
+Only "cut into the shape" with features is affected, and only with features present — the same
+path whose rim tearing was repaired earlier. Boundary edges 0 and non-manifold edges 0, so every
+existing check passes.
+
+**The winding pass is not at fault.** It seeds from EVERY face (`for(let s0=0;s0<nT;s0++)`), so
+it is not a one-component walk, and it is guarded: it counts bad edges, tries, counts again and
+reverts if it did not improve. It runs after the carve. It is trying and failing on these 86.
+
+**A face-adjacency walk shows FIVE components — the body plus four 12-triangle fragments.**
+
+**AND HERE IS WHERE I OVERCLAIMED, corrected before shipping anything.** I called those fragments
+loose debris in the STL and moved `dropTinyShells` to sweep them. **It removed nothing** —
+84,614 triangles before and after — because `dropTinyShells` unions VERTICES while my count used
+FACES. The fragments are face-disconnected but vertex-ATTACHED: pinched to the body at a point,
+not floating. A no-op change behind a comment claiming a fix is worse than no change, so it was
+reverted; index.html is unchanged at 8c6da036.
+
+**Two notions of "connected" that do not agree, and the difference is the whole finding.**
+
+### NEXT, and what NOT to do
+- **Do not add a directed-edge test to the suite yet.** It would go red on the shipping field
+  carve path. Fix the cause first, then add the test — a gate that is red on arrival teaches
+  people to ignore it.
+- The existing `orientable()` helper cannot catch this. It asks whether a consistent winding
+  COULD exist, which is a parity question; a flipped patch is still orientable. Nothing in the
+  suite asks whether the winding IS consistent, and that is the blind spot both this and the
+  pole-fan bug lived in.
+- **The bad edges cluster at the body's extremities.** 86 edges in 9 clusters, biggest 26, at
+  (194,-43,62), (21,-54,32), (194,42,62) — the tail and nose corners, on a body spanning x 0..200
+  and y +/-57. Not spread over the surface.
+
+- **HYPOTHESIS TESTED AND FALSIFIED: it is not features that reach the view edge.** 25 of the
+  153 come within 2% of a view border, which matched 9 clusters suspiciously well. It is wrong:
+
+      all 153 features       86 bad edges
+      128 inner features    110 bad edges     <- REMOVING the suspects made it WORSE
+      25 edge-touching        6 bad edges
+
+- **And the count is NOT MONOTONIC in the feature set**, which is the more useful half. A
+  128-feature subset scores worse than the full 153, so features can HEAL each other's pinches —
+  a later carve removing a region an earlier one pinched. **Bisection cannot isolate a culprit
+  here**, and anyone reaching for it will burn a session: there is no single offending feature to
+  find. Whatever this is, it is a property of the carve-and-mesh interaction at certain
+  configurations, not of any one input.
+
+======================================================================
+## makeRevolve's POLE FANS WERE WOUND BACKWARDS. Fixed 2026-08-30.
+======================================================================
+_Found by running Dylan's whole workflow end to end rather than by a report. Latent in
+`makeRevolve` — the retired revolve builder — and inherited by the new lathe._
+
+A side quad emits `s0+j -> s0+jn` on its LOWER ring and `s1+jn -> s1+j` on its UPPER one. A pole
+fan meeting a ring has to OPPOSE whatever the quad on the other side of that ring did, or the
+shared directed edge is traversed twice the same way and the surface stops being consistently
+oriented. **Both fans matched their neighbour instead of opposing it.**
+
+    if(p0){ … idx.push(s0, s1+j,  s1+jn);}   ->  idx.push(s0, s1+jn, s1+j)
+    else if(p1){ … idx.push(s1, s0+jn, s0+j);}  ->  idx.push(s1, s0+j,  s0+jn)
+
+**NOTHING IN THE SUITE COULD SEE IT.** An edge-USE count still reads two, so the mesh looks
+watertight and `checkManifold` agrees. Only the SIGNED volume can tell, and `makeRevolve`'s own
+closing `if(vol<0)` flip cannot repair mixed winding — it flips everything and preserves the
+inconsistency. This is the trap the suite already documents about flipped patches, sitting
+unnoticed in the one builder nobody was exercising.
+
+    fountain, before   56 bad directed edges — exactly one ring, at z=88.1 under the pole
+                       volume 341.1 cm3 against an analytic 473.2. 28% signed away.
+    fountain, after     0 bad edges, 472.2 cm3 — the remaining 0.2% is a 56-gon inscribed
+                        in a circle, which is what it should be
+    true sphere R=50    0 bad edges, 522.0 cm3 against 523.6
+    279 of 279
+
+**How it was found is the point.** The studio and the exact kernel disagreed by 28% on a
+fountain while agreeing to 2.6% on a building, and only running BOTH shapes through BOTH ends
+in one pass made that visible. Neither end looked wrong on its own; the analytic volume of the
+solid of revolution settled which one was.
+
+**A wrong fixture nearly muddied it:** the first sphere check used `r = R*sin(pi*t)`, which is
+not a sphere's profile — it reads 25% under and looks like a second bug. The profile of a sphere
+is `r = R*sqrt(1-(2t-1)^2)`. Check the fixture before believing a discrepancy it reports.
+
+======================================================================
 ## ROUND OBJECTS — a lathe about the vertical axis. Built 2026-08-30.
 ======================================================================
 _Prompted by an example fountain drawing for the roundabout centre. **A visual hull cannot
@@ -1943,13 +2196,160 @@ across a feature and the feature is what you measure.
     278 of 278
 
 ### NOT DONE YET, and deliberately
-- **No UI.** `shape:"lathe"` is reachable from a profile but there is no control for it. Wiring
-  it needs a decision about where it sits beside "follow my drawing" and the smooth loft.
-- **Detecting roundness.** Collin suggested reading "diameter"/"radius" off the drawing. **A
-  circularity test on the TRACED OUTLINE is far more robust than OCR** — the app already has the
-  polygon, and one of his two examples is a hand-annotated survey sheet whose text no OCR would
-  read. Comparing the top outline against a best-fit circle is a few lines and cannot be fooled
-  by handwriting. Text should be a hint at most, never the mechanism.
+### THE UI — shipped 2026-08-30. **"Round · turned"**, a third button in the Shape style row.
+
+It sits with Smooth and Follow my drawing because **it answers the same question they do** —
+how the body is built from the outlines — and the three are genuinely exclusive. Technically it
+is a SHAPE not a mode, so it sets `S.shape="lathe"` and parks `S.mode` on the projection builder
+underneath; picking either of the others puts the shape back. One place to look for "what kind
+of thing is this" rather than a separate switch somewhere else.
+
+**Two guards, both saying something rather than silently doing something:**
+- No traced side elevation -> says a turned object is built from its side, because each
+  height's radius is half the outline's width there and without it there is nothing to sweep.
+- A traced plan that is NOT round -> says so, and that turning it will build what the elevation
+  sweeps, which may not be the drawing. It still lets them; the circularity measure is evidence,
+  not a veto.
+
+**The profile carries `revProfileV` and `revHeight`.** Without them a saved fountain reloads as
+whatever `sidePoly` means to another builder, and the height falls back to `length` — which for
+a fountain is its DIAMETER, so it would come back squat. Written only for a lathe, so no other
+model gains a key. The load path reflects the shape before the mode, or a reopened fountain
+shows "Follow my drawing" lit while building as a lathe.
+
+    makeBody shape:loft  -> 102360 tris (the hull)
+    makeBody shape:lathe ->   5376 tris, 0.00% out of round
+    279 of 279
+### AUDITED WORKSHOP FOR OTHER RE-DECIDED RULES — 2026-08-30. It comes back clean.
+Two bugs in two turns were Workshop deciding something the studio had already thought through
+(a rectangular plate under a round body; a plate half a length out of place), so the rest of it
+was checked rather than waiting for a third. **Workshop reads only `sepBottom`, `shape` and
+`mode`** — all three now go through the same test the studio uses. `thumbMeshFor` also reads
+`mode`, to force `hullFast` for thumbnails, which is a deliberate speed choice and documented as
+one. Nothing else in the Workshop path re-derives a studio decision. **The surface was small;
+it just had both of its members broken.**
+
+### THE PLAN NOW REPORTS WHAT THE MODEL STANDS FOR — fixed 2026-08-30
+Pushing a turned object through the whole API surfaced this: `plan()` computes `real_dims` and
+`scale_mismatch`, and the `plan_only` response is a CURATED dict that never included them. So
+the scale a profile carries was worked out on every request and thrown away, and nothing
+downstream could tell a 120mm building at 1:200 from a 120mm one at 1:100 — which is the entire
+point of keeping the real figure. Both are now in the response, mutation-checked.
+
+**End to end, a fountain through the API:**
+
+    schema           a lathe profile validates (no enum on `shape`, so "lathe" is accepted)
+    plan_only        200, real_dims and scale_mismatch reported
+    STEP             200, 19208 bytes, starts ISO-10303-21
+    79 passed, 1 skipped  |  schema checker clean
+
+**The `shape` description in the schema was stale** — "Section family for the loft builder",
+written before a lathe existed and no longer the whole truth, when `shape` is now the thing that
+picks the builder. Corrected. A description is what a reader trusts when they do not read the
+code.
+
+### THE EXACT END NOW TURNS TOO — shipped 2026-08-30, and it was a divergence I created
+Adding a lathe to the studio without one here meant **a fountain previewed as round would export
+through the hull and arrive SQUARE** — 36% out of round, the two ends disagreeing about the whole
+part. Caught by asking, one turn after building it, whether the exact end knew the shape existed.
+It did not.
+
+`build_solid` now dispatches on `shape == "lathe"` **before `plan()` is reached**, because every
+line below that assumes the body is the intersection of three silhouettes. `build_lathe` revolves
+the radius profile, which costs nothing to be exact — this end is ROUNDER than the studio's
+56-sided approximation rather than merely equal to it.
+
+    solid   525.73 cm3   valid   z [0.0, 100.0]   0.00% out of round at z=40
+    hollow   72.83 cm3   valid   an empty axis, so a real shell
+    78 passed, 1 skipped  |  schema checker clean
+
+**The revolve axis cost a debugging round and is worth writing down: `revolve`'s axis points are
+in the WORKPLANE's local coordinates, not world.** On the XZ plane, world Z is local `(0,1,0)`;
+passing `(0,0,1)` revolves about the plane normal — world -Y — and produces a body spanning
+z -101..101 with zero volume. The test says so in its failure message.
+
+**Hollowing is revolved too**, from the same profile pulled in by one wall and stopped one wall
+short of the top: the top keeps its thickness, the underside is open. Same convention as the rest
+of the file, and a solid fountain at model scale is a great deal of filament.
+
+**Three schema keys needed the contract test's allow-list, each with a reason in the code.**
+`shape`, `revProfileV` and `revHeight` are read by the exact BUILD and never by `plan()` — the
+lathe skips it entirely — so mutating them cannot move `plan()`'s answer. That is what ELSEWHERE
+is for. The claim in `x-read-by` is still true and the coverage checker verifies it against both
+sources.
+
+### A TURNED OBJECT IS NOT PLATED — fixed 2026-08-30
+`wsMeshFor` bolts a separate bottom plate onto anything whose profile does not say
+`sepBottom:false`, and `makeBottom` builds that plate from `widthProfile` and `bottomProfile` —
+a RECTANGULAR slab. Under a round fountain that is plainly wrong, and the lathe already closes
+its own base. `revolve` was excluded from the separate-bottom option long ago for exactly this
+reason; the exclusion simply never reached Workshop or the new lathe. Both guards now name all
+three. **279 of 279.**
+
+### THE LATHE IS CENTRED ON ITS AXIS AND STAYS THAT WAY — a decision, not an oversight
+The three builders do not agree about where an object's origin is:
+
+    hull   (a building)   x[-0.1, 120.1]   origin at the END
+    smooth                x centred        origin at the MIDDLE
+    lathe  (a fountain)   x[-60.0, 60.0]   origin at the MIDDLE
+
+Workshop does not re-centre — `wsMeshFor` hangs the body on a pivot at the origin — so this
+reaches placement: dropping a building on the plan puts its corner at the point, a fountain its
+middle.
+
+**I nearly "fixed" the lathe to match the hull and that would have been wrong.** A turned object's
+axis IS its origin, and Workshop rotates an instance about its pivot. Shifting the lathe so its
+origin sat at a bounding-box corner would make `wsRX/wsRY/wsRZ` swing a fountain around a corner
+instead of spinning it in place, which is obviously not what anyone wants of a fountain in a
+roundabout. Two of the three builders are already centred; **the hull is the odd one out**, and
+that is the same origin discrepancy recorded during the Question B work. Leave the lathe alone.
+If anything is ever changed here it should be the hull, and that has a large blast radius —
+every saved model and every saved Workshop assembly.
+
+### WORKSHOP NOW OBEYS THE STUDIO'S SEPARATE-BOTTOM RULE — fixed 2026-08-30
+`makeBottom` lays the plate at `x=(xf-0.5)*L`, so **-L/2..L/2**, while the projection body
+measures **x[0, L]**. That is an offset of half the model's length. It is arithmetic off one
+unambiguous line plus a measurement, not a guess — `loftBase`, the thing that blocked running
+`makeBottom` headlessly, only affects the plate's Z.
+
+The studio has always refused a separate bottom in projection mode and was right to. **Workshop
+never knew the rule** — `wsMeshFor` checked only `sepBottom!==false` — so a traced car profile,
+which is projection with `sepBottom:true`, got the offset plate. The smooth builder is centred,
+so there the plate lines up, which is why this went unseen. Both places now apply the same test.
+
+**On the check list as item 0c**, because what needs a human is the opposite of what I fixed: if
+a car in Workshop had a plate that was visibly there and CORRECT, then the arithmetic is wrong
+somewhere and this should be reverted. **279 of 279.**
+
+### DETECTING ROUNDNESS — `outlineCircularity`, built 2026-08-30
+Radial deviation from the AREA centroid, thresholded at 0.12. Not the isoperimetric ratio: a
+many-sided polygon scores near 1 on that whether or not it is round, and an ellipse scores well
+too — and an ellipse is not a lathe shape. Calibrated against real shapes, not guessed:
+
+    perfect circle 64 pts   0.001  ROUND      ellipse 1.3:1        0.184  not round
+    circle, 16 pts          0.013  ROUND      his car, top         0.190  not round
+    hand-traced, 3% wobble  0.041  ROUND      rounded rect 2:1     0.493  not round
+    octagon                 0.050  ROUND      square               1.000  not round
+    hand-traced, 8% wobble  0.108  ROUND      his car, side        0.828  not round
+
+A 1.15:1 ellipse lands at 0.099 and reads round. That overlap with a hand-traced circle is
+inherent and acceptable **because this only raises a hint** — nobody's model is changed by it.
+
+**IT SAMPLES THE PERIMETER, NOT THE VERTICES, and that was a real bug caught by a fixture.**
+Measuring only corners let a 2:1 rounded rectangle score **0.014 — rounder than a hand-traced
+circle** — because all eight of its corners sit at one radius and its long flat sides were never
+looked at. Walking the outline at even arc length cannot be fooled by where somebody put a
+point, and the same shape now reads 0.493. There is a test pinning exactly that shape with a
+message saying so, because it is the failure this measure invites.
+
+**The hint is a hint.** Raised once per trace, changes nothing on its own. Guessing at intent
+and silently rebuilding somebody's model as a different kind of object would be worse than
+saying nothing. Wrapped in a try/catch — a hint is never worth breaking a trace over.
+
+**On words: there is no text source yet.** Reading "diameter" or "radius" off a drawing needs
+OCR, which does not exist in this app, and one of the two example sheets is hand-annotated in
+biro. If a text source ever appears, words are worth taking as CORROBORATION of the geometry —
+never as the mechanism, and never on their own.
 
 ======================================================================
 ## OPEN ITEMS
