@@ -223,3 +223,40 @@ def test_too_little_evidence_decides_nothing():
     one = ([_ln(0, 0, 1219.2 / S, 0)], [{"text": "4'-0\"", "x": 12.0, "y": 2.0}])
     assert infer_plot_scale(*one) is None
     assert infer_plot_scale([], []) is None
+
+
+def test_a_narrow_win_over_coincidences_is_not_an_answer():
+    """Measured on a real sheet: L404 of the Saratoga Springs set carries 59,794 strokes, and
+    at a 40mm search radius the true 1:48 beat a coincidence 126 to 121 — a 4% lead. The right
+    answer, and luck. `min_lead` makes the margin part of the claim.
+
+    Two candidates have to be in contention for a lead to mean anything, so the fixture puts
+    them there: a 25.4mm stroke is 4'-0" at 1:48 and 8'-0" at 1:96, so four of the first and
+    three of the second give 1:48 a win of 4 to 3 — a win, and not a lead."""
+    from app.pdf_import import infer_plot_scale
+    strokes, words = [], []
+    for k in range(4):                                   # four that only work at 1:48
+        y = k * 60.0
+        strokes.append(_ln(0, y, 25.4, y))
+        words.append({"text": "4'-0\"", "x": 12.7, "y": y + 1.0})
+    for k in range(3):                                   # three that only work at 1:96
+        y = 500.0 + k * 60.0
+        strokes.append(_ln(0, y, 25.4, y))
+        words.append({"text": "8'-0\"", "x": 12.7, "y": y + 1.0})
+    assert infer_plot_scale(strokes, words, min_lead=1.0) == pytest.approx(48.0), (
+        "with no lead required, the bare win stands")
+    assert infer_plot_scale(strokes, words) is None, (
+        "4 against 3 is a win, not a lead — the default must refuse it")
+
+
+def test_the_two_jobs_use_different_search_radii_on_purpose():
+    """With the scale KNOWN the length check does the work and a generous radius finds more
+    real dimensions — tightening to 12mm cost sheet L201B more than half of them, 26 down to
+    10, for nothing. With the scale GUESSED there is no length check yet, only a comparison,
+    and the radius IS the discriminator. One default cannot serve both."""
+    import inspect
+    from app.pdf_import import link_dimensions, infer_plot_scale
+    assert inspect.signature(link_dimensions).parameters["search_mm"].default == 25.0
+    src = inspect.getsource(infer_plot_scale)
+    assert "search_mm=8.0" in src, (
+        "inference must pass its own tight radius, not inherit the linking default")
