@@ -152,3 +152,74 @@ def test_the_sheet_scale_is_found_whichever_notation_it_is_printed_in():
     assert detect_plot_scale([w("1/4\""), w("="), w("1'-0\"")]) == pytest.approx(48)
     # two different scales on one sheet is genuinely ambiguous: say nothing
     assert detect_plot_scale([w("1:200"), w("1/4\" = 1'-0\"")]) is None
+
+
+# =====================================================================================
+# LINKING A DIMENSION TO WHAT IT DIMENSIONS.
+# A dimension in CAD is not one object — two witness lines, a dimension line, a text run, and
+# nothing in the file saying they belong together. The link here is ARITHMETIC: a line drawn L
+# mm on paper at 1:S measures L*S, and the text says what that should be. Proximity alone would
+# pair a 4'-0" with whatever line happened to be nearest, which on a dense sheet is often wrong.
+# =====================================================================================
+def _ln(x0, y0, x1, y1):
+    return [[x0, y0], [x1, y1]]
+
+
+def test_a_dimension_is_matched_to_the_line_whose_length_agrees_with_it():
+    from app.pdf_import import link_dimensions
+    S = 48.0                                    # 1/4" = 1'-0", the column detail sheets
+    strokes = [_ln(0, 0, 1219.2 / S, 0),        # a 4'-0" width
+               _ln(0, 0, 0, 3759.2 / S)]        # a 12'-4" height
+    words = [{"text": "4'-0\"", "x": 1219.2 / S / 2, "y": 2.0},
+             {"text": "12'-4\"", "x": 2.0, "y": 3759.2 / S / 2}]
+    got = {d["text"]: d for d in link_dimensions(strokes, words, S)}
+    assert set(got) == {"4'-0\"", "12'-4\""}
+    assert got["4'-0\""]["stroke"] == 0 and got["4'-0\""]["error"] < 1e-6
+    assert got["12'-4\""]["stroke"] == 1
+
+
+def test_a_nearer_line_of_the_wrong_length_is_not_the_match():
+    """THE WHOLE POINT. A decoy sits closer to the text than the line the dimension belongs to.
+    Proximity would take it; arithmetic does not."""
+    from app.pdf_import import link_dimensions
+    S = 48.0
+    strokes = [_ln(0, 0, 1219.2 / S, 0),        # the real 4'-0"
+               _ln(10, 1, 13, 1)]               # a 3mm stub right beside the text
+    words = [{"text": "4'-0\"", "x": 11.0, "y": 1.5}]
+    got = link_dimensions(strokes, words, S)
+    assert len(got) == 1 and got[0]["stroke"] == 0, (
+        "the decoy is nearer but measures 3mm*48 = 144mm, not 4 feet")
+
+
+def test_a_plotted_line_is_allowed_to_be_slightly_off_but_not_wrong():
+    from app.pdf_import import link_dimensions
+    S = 48.0
+    exact = 1219.2 / S
+    words = [{"text": "4'-0\"", "x": exact / 2, "y": 2.0}]
+    assert link_dimensions([_ln(0, 0, exact * 1.01, 0)], words, S), "1% off must still match"
+    assert not link_dimensions([_ln(0, 0, exact * 1.25, 0)], words, S), "25% off is a different line"
+
+
+def test_the_scale_can_be_recovered_from_the_line_work_alone():
+    """A title block can be missing, wrong, or belong to a different detail on the same sheet.
+    The line work cannot: the ratio that makes the written dimensions agree with the lengths
+    actually drawn IS the scale."""
+    from app.pdf_import import infer_plot_scale
+    S = 48.0
+    strokes = [_ln(0, 0, 1219.2 / S, 0), _ln(0, 0, 0, 3759.2 / S),
+               _ln(50, 50, 50 + 7010.4 / S, 50)]
+    words = [{"text": "4'-0\"", "x": 1219.2 / S / 2, "y": 2.0},
+             {"text": "12'-4\"", "x": 2.0, "y": 3759.2 / S / 2},
+             {"text": "23'-0\"", "x": 50 + 7010.4 / S / 2, "y": 52.0}]
+    assert infer_plot_scale(strokes, words) == pytest.approx(48.0)
+
+
+def test_too_little_evidence_decides_nothing():
+    """One agreeing dimension is a coincidence waiting to happen, and a tie is not an answer.
+    Both return None — the same refusal `detect_plot_scale` makes on a sheet carrying two
+    ratios, and for the same reason: guessing here is wrong by whole multiples."""
+    from app.pdf_import import infer_plot_scale
+    S = 48.0
+    one = ([_ln(0, 0, 1219.2 / S, 0)], [{"text": "4'-0\"", "x": 12.0, "y": 2.0}])
+    assert infer_plot_scale(*one) is None
+    assert infer_plot_scale([], []) is None
