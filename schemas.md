@@ -1886,10 +1886,34 @@ typed in twice. Reading it is not a convenience; retyping is a second chance to 
 the document.
 
 **Not yet read, in the order they are worth doing:**
-1. **Associating a dimension with the geometry it dimensions.** `extract_geometry` gives the
-   line work and `parse_feet_inches` gives the number; nothing yet says WHICH line the 4'-0"
-   belongs to. A dimension is drawn as its own primitives — witness lines, arrowheads, a text
-   run — near what it measures. That proximity is the link, and it is the next real piece.
+1. ~~Associating a dimension with the geometry it dimensions~~ **DONE 2026-08-30 —
+   `link_dimensions()` and `infer_plot_scale()`.**
+
+   **THE LINK IS ARITHMETIC, NOT PROXIMITY.** A line drawn L mm on paper at 1:S measures L*S,
+   and the text beside it says what that should be — so a candidate is accepted only when the
+   drawn length AGREES with the written number. Proximity alone would pair a 4'-0" with
+   whatever line happened to be nearest, which on a dense sheet is often the wrong one. There
+   is a test with a decoy stub sitting closer to the text than the line the dimension belongs
+   to, and it picks the right one.
+
+   Tolerance 2%: a plotted line is not exact and a sheet may round to the nearest inch. 1% off
+   still matches, 25% off does not.
+
+   **AND IT RUNS BACKWARDS. `infer_plot_scale()` recovers the scale from the line work alone**
+   — the ratio that makes the most written dimensions agree with the lengths actually drawn IS
+   the scale. Verified at 1:48 on a synthetic column detail with no title block at all. That
+   matters because a title block can be missing, wrong, or belong to a DIFFERENT detail on the
+   same sheet, and Dylan's sheets carry four scales between them. It returns None on fewer than
+   three agreeing dimensions or on a tie — one coincidence is not evidence and a tie decides
+   nothing, the same refusal `detect_plot_scale` already makes.
+
+   **A mutation test that did not bite, and what it taught.** Removing the agreement FILTER did
+   not fail the decoy test, because the error term was still in the ranking and the right line
+   won anyway. The test only bites when the filter is removed AND the ranking is reduced to
+   distance — i.e. genuine pure proximity. **A test that survives the obvious mutation is not
+   yet proven; find the mutation that expresses what the test claims.**
+
+       89 passed, 1 skipped
 2. **The Northing/Easting schedule.** A table of survey points is placement data and is already
    reduced by hand in the section above; parsing the table is straightforward once text runs
    carry positions, which they do.
