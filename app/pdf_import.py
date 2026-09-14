@@ -428,3 +428,112 @@ def infer_plot_scale(strokes, words, candidates=None, min_matches: int = 3,
     if len(scored) > 1 and best_n < scored[1][0] * min_lead:
         return None                     # a narrow win over a coincidence is not evidence
     return float(best_c)
+
+
+# ----------------------------------------------------------------------------------------
+# THE SURVEY SCHEDULE. A NORTHING/EASTING POINT SCHEDULE is placement data: it says where each
+# column, wall centreline and sign stands, to four decimals of a foot. Dimensions say how big
+# a thing is; only the schedule says WHERE it goes, and typing ten coordinates at four decimals
+# by hand is exactly the transcription this importer exists to remove.
+#
+# **THE TABLE MAY BE ROTATED, AND ON A REAL SHEET IT WAS.** On L201B of the Saratoga Springs
+# set every one of the ten eastings shares a single y and has its own x: what a reader sees as
+# rows running down the page are, in page coordinates, columns running across it. A landscape
+# sheet rotates its schedules as readily as its title block. So the axis is not assumed — both
+# are tried, and the one that yields more COMPLETE records wins. A record is complete only with
+# both a northing and an easting, which is what makes that test meaningful rather than circular.
+# ----------------------------------------------------------------------------------------
+_COORD_RE = re.compile(r"^([NE])\s*(\d{3,9}(?:\.\d+)?)$", re.IGNORECASE)
+_BARE_COORD_RE = re.compile(r"^\d{3,9}(?:\.\d+)?$")
+
+
+def _bands(words, axis: str, tol: float = 2.0):
+    """Group word runs into bands sharing a position on one axis.
+
+    A PDF has no rows. A table is a table only because its cells share a baseline, so that
+    baseline has to be reconstructed — along y for an upright table, along x for a rotated one.
+    """
+    key = (lambda w: w.get("y", 0.0)) if axis == "y" else (lambda w: w.get("x", 0.0))
+    other = (lambda w: w.get("x", 0.0)) if axis == "y" else (lambda w: -w.get("y", 0.0))
+    out: List[List[Dict]] = []
+    for w in sorted(words or [], key=lambda w: (-key(w), other(w))):
+        for band in out:
+            if abs(key(band[0]) - key(w)) <= tol:
+                band.append(w)
+                break
+        else:
+            out.append([w])
+    for band in out:
+        band.sort(key=other)
+    return out
+
+
+def _pos(w, axis: str) -> float:
+    """Where a word sits along the axis the band runs in."""
+    return w.get("x", 0.0) if axis == "y" else -w.get("y", 0.0)
+
+
+def _points_from_bands(bands, axis: str, gap_mm: float = 25.0) -> List[Dict]:
+    out: List[Dict] = []
+    for band in bands:
+        northing = easting = None
+        used = set()
+        for i, w in enumerate(band):
+            t = (w.get("text") or "").strip()
+            m = _COORD_RE.match(t)
+            if m:
+                v = float(m.group(2))
+                if m.group(1).upper() == "N" and northing is None:
+                    northing = v; used.add(i)
+                elif m.group(1).upper() == "E" and easting is None:
+                    easting = v; used.add(i)
+                continue
+            if t.upper() in ("N", "E") and i + 1 < len(band):
+                nxt = (band[i + 1].get("text") or "").strip()
+                if _BARE_COORD_RE.match(nxt):
+                    v = float(nxt)
+                    if t.upper() == "N" and northing is None:
+                        northing = v; used.update((i, i + 1))
+                    elif t.upper() == "E" and easting is None:
+                        easting = v; used.update((i, i + 1))
+        if northing is None or easting is None:
+            continue                     # half a coordinate is worse than none
+        # KEEP ONLY THE RUN ADJACENT TO THE COORDINATES. A band spans the whole sheet, so it
+        # sweeps in whatever else happens to share that line — on the real L201B the
+        # descriptions came back carrying "CHECKED BY: DEP", "SHEET NUM" and a plot timestamp
+        # from the title block, and one point lost its id to it. A schedule entry is a
+        # CONTIGUOUS run: id, description, then the coordinates. So walk back from the first
+        # coordinate while the words keep touching, and stop at the first real gap. Measured on
+        # the real band for point 21: gaps WITHIN the record run 10-20mm, and the jump from the
+        # easting to the title block'''s "L201B" is 38mm. 25mm sits between them. Walking
+        # BACKWARD also drops the trailing title block for free — it is never visited.
+        first = min(used)
+        keep: List[int] = []
+        prev = _pos(band[first], axis)
+        for i in range(first - 1, -1, -1):
+            here = _pos(band[i], axis)
+            if abs(prev - here) > gap_mm:
+                break
+            keep.append(i)
+            prev = here
+        keep.reverse()
+        head = [(band[i].get("text") or "").strip() for i in keep]
+        pid = None
+        if head and head[0].isdigit():
+            pid = int(head[0]); head = head[1:]
+        out.append({"id": pid, "description": " ".join(h for h in head if h).strip(),
+                    "northing": northing, "easting": easting})
+    return out
+
+
+def parse_point_schedule(words) -> List[Dict]:
+    """Survey points from a NORTHING/EASTING schedule: id, description, northing, easting.
+
+    Read off whole bands rather than by scanning for numbers, because a sheet is covered in
+    numbers — dimensions, radii, elevations, sheet references — and only the ones sharing a
+    band with BOTH a northing and an easting are survey points. Requiring the pair is what
+    keeps a dimension out of the placement data.
+    """
+    by_y = _points_from_bands(_bands(words, "y"), "y")
+    by_x = _points_from_bands(_bands(words, "x"), "x")
+    return by_x if len(by_x) > len(by_y) else by_y
