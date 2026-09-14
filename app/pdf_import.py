@@ -300,3 +300,102 @@ def detect_plot_scale(words) -> Optional[float]:
                 if a:
                     found.add(int(round(a)))
     return float(found.pop()) if len(found) == 1 else None
+
+
+# ----------------------------------------------------------------------------------------
+# LINKING A DIMENSION TO WHAT IT DIMENSIONS.
+#
+# `extract_geometry` gives the line work and `parse_feet_inches` gives the number, and until
+# now nothing said WHICH line the 4'-0" belonged to. A dimension in CAD is not one object: it
+# is two witness lines, a dimension line between them, and a text run near its middle. There
+# is no marker in the file saying they belong together.
+#
+# **The link is arithmetic, not proximity.** A dimension line drawn L millimetres on paper at
+# a scale of 1:S measures L*S in the real world, and the text beside it says what that is. So
+# a candidate is only accepted when the drawn length AGREES with the written number. That is
+# a check, not a guess: proximity alone would happily pair a 4'-0" with whatever line happened
+# to be nearest, and on a dense sheet that is often the wrong one.
+#
+# It also runs backwards. Given enough dimensions, the scale that makes the most of them agree
+# with their own line work IS the scale — read from the drawing's internal consistency rather
+# than from a title block that may be missing, wrong, or belong to a different detail on the
+# same sheet.
+# ----------------------------------------------------------------------------------------
+def _seg_len(a, b) -> float:
+    return ((a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2) ** 0.5
+
+
+def _polyline_len(pts) -> float:
+    return sum(_seg_len(pts[i], pts[i + 1]) for i in range(len(pts) - 1))
+
+
+def link_dimensions(strokes, words, scale: float, tol: float = 0.02,
+                    search_mm: float = 40.0) -> List[Dict]:
+    """Pair each written dimension with the stroke whose drawn length agrees with it.
+
+    `scale` is the plot ratio: 48 for 1/4"=1'-0". A stroke of L mm on paper stands for L*scale
+    mm of building, and a dimension text is accepted against that stroke only when the two
+    agree to within `tol` (2% by default — a plotted line is not exact, and a dimension may be
+    rounded to the nearest inch on the sheet).
+
+    Returns one entry per dimension text that found a match, carrying the error so a caller can
+    see HOW well it agreed rather than only that it did. Unmatched dimensions are simply absent:
+    a dimension whose line cannot be found is not a dimension anyone should build from.
+    """
+    if not scale or scale <= 0:
+        return []
+    lens = [(_polyline_len(s), s) for s in strokes if len(s) > 1]
+    out: List[Dict] = []
+    for w in words or []:
+        mm = parse_feet_inches(w.get("text", ""))
+        if not mm or mm <= 0:
+            continue
+        want_paper = mm / scale
+        best = None
+        for i, (paper, s) in enumerate(lens):
+            if paper <= 1e-9:
+                continue
+            err = abs(paper - want_paper) / want_paper
+            if err > tol:
+                continue
+            mid = ((s[0][0] + s[-1][0]) / 2.0, (s[0][1] + s[-1][1]) / 2.0)
+            dist = _seg_len((w.get("x", 0.0), w.get("y", 0.0)), mid)
+            if dist > search_mm:
+                continue
+            if best is None or (err, dist) < (best["error"], best["distance"]):
+                best = {"text": w.get("text", ""), "mm": mm, "stroke": i,
+                        "paper_mm": paper, "error": err, "distance": dist}
+        if best:
+            out.append(best)
+    return out
+
+
+def infer_plot_scale(strokes, words, candidates=None, min_matches: int = 3):
+    """The scale the drawing's own dimensions agree with, or None.
+
+    A title block can be missing, wrong, or belong to a different detail on the same sheet.
+    The line work cannot: if most written dimensions agree with the lengths actually drawn at
+    some ratio, that ratio is the scale. Tried against the architectural and metric ratios that
+    appear on real sheets.
+
+    Returns None unless one candidate is clearly best — a tie means the evidence does not
+    decide, and picking one is wrong by whole multiples. Same refusal `detect_plot_scale` makes
+    when a sheet carries two ratios.
+    """
+    if candidates is None:
+        candidates = [12, 16, 24, 32, 48, 64, 96, 120, 192, 240, 384, 480,   # imperial
+                      10, 20, 25, 50, 100, 200, 250, 500, 1000]              # metric
+    scored = []
+    for c in candidates:
+        n = len(link_dimensions(strokes, words, float(c)))
+        if n:
+            scored.append((n, c))
+    if not scored:
+        return None
+    scored.sort(reverse=True)
+    best_n, best_c = scored[0]
+    if best_n < min_matches:
+        return None
+    if len(scored) > 1 and scored[1][0] >= best_n:
+        return None                     # a tie decides nothing
+    return float(best_c)
