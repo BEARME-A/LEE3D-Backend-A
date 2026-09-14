@@ -330,13 +330,34 @@ def _polyline_len(pts) -> float:
 
 
 def link_dimensions(strokes, words, scale: float, tol: float = 0.02,
-                    search_mm: float = 40.0) -> List[Dict]:
+                    search_mm: float = 25.0) -> List[Dict]:
     """Pair each written dimension with the stroke whose drawn length agrees with it.
 
     `scale` is the plot ratio: 48 for 1/4"=1'-0". A stroke of L mm on paper stands for L*scale
     mm of building, and a dimension text is accepted against that stroke only when the two
     agree to within `tol` (2% by default — a plotted line is not exact, and a dimension may be
     rounded to the nearest inch on the sheet).
+
+    **`search_mm` IS NOT COSMETIC — it is what makes the length check mean anything.** It began
+    at 40mm, which sounds tight until you meet a real sheet: L404 of Dylan's set carries 59,794
+    strokes, and within 40mm of any dimension text there is a stroke of very nearly the right
+    length AT ALMOST ANY SCALE. Measured on that page, sweeping candidate scales:
+
+        search 40 mm -> true 1:48 wins 126 to 121.  A 4% lead. Right answer, barely.
+        search 15 mm -> 76 to 32.    lead 138%
+        search  8 mm -> 59 to 14.    lead 321%
+        search  4 mm -> 42 to 4.     lead 950%
+
+    **But the right radius differs by job, so the two callers no longer share one.** When the
+    scale is KNOWN the length check is already doing the work and a generous radius simply
+    finds more true dimensions — tightening to 12mm cost page L201B more than half of them,
+    26 matches down to 10, for no gain. When the scale is being GUESSED there is no length
+    check yet, only a comparison between candidates, and then the radius is the entire
+    discriminator. So `link_dimensions` keeps 25mm and `infer_plot_scale` passes 8mm itself.
+
+    **Match QUALITY does not rescue a loose radius** — at 40mm the WRONG candidate 1:200 had a
+    lower mean error AND more sub-0.2% matches than the true scale. Only proximity separates
+    them, which is worth knowing before anyone tries to score these by how well they fit.
 
     Returns one entry per dimension text that found a match, carrying the error so a caller can
     see HOW well it agreed rather than only that it did. Unmatched dimensions are simply absent:
@@ -370,7 +391,8 @@ def link_dimensions(strokes, words, scale: float, tol: float = 0.02,
     return out
 
 
-def infer_plot_scale(strokes, words, candidates=None, min_matches: int = 3):
+def infer_plot_scale(strokes, words, candidates=None, min_matches: int = 3,
+                     min_lead: float = 1.5):
     """The scale the drawing's own dimensions agree with, or None.
 
     A title block can be missing, wrong, or belong to a different detail on the same sheet.
@@ -381,13 +403,20 @@ def infer_plot_scale(strokes, words, candidates=None, min_matches: int = 3):
     Returns None unless one candidate is clearly best — a tie means the evidence does not
     decide, and picking one is wrong by whole multiples. Same refusal `detect_plot_scale` makes
     when a sheet carries two ratios.
+
+    "Clearly best" is a LEAD, not a win. On a dense sheet the runner-up is a pile of
+    coincidences, and a 4% margin over a coincidence is not evidence — measured at 126 to 121
+    on a real sheet before the search radius was tightened. `min_lead` is the ratio the best
+    must beat the runner-up by.
     """
     if candidates is None:
         candidates = [12, 16, 24, 32, 48, 64, 96, 120, 192, 240, 384, 480,   # imperial
                       10, 20, 25, 50, 100, 200, 250, 500, 1000]              # metric
     scored = []
     for c in candidates:
-        n = len(link_dimensions(strokes, words, float(c)))
+        # 8mm, not the linking default: with the scale unknown, proximity is the only thing
+        # separating the true ratio from a pile of coincidences on a dense sheet.
+        n = len(link_dimensions(strokes, words, float(c), search_mm=8.0))
         if n:
             scored.append((n, c))
     if not scored:
@@ -396,6 +425,6 @@ def infer_plot_scale(strokes, words, candidates=None, min_matches: int = 3):
     best_n, best_c = scored[0]
     if best_n < min_matches:
         return None
-    if len(scored) > 1 and scored[1][0] >= best_n:
-        return None                     # a tie decides nothing
+    if len(scored) > 1 and best_n < scored[1][0] * min_lead:
+        return None                     # a narrow win over a coincidence is not evidence
     return float(best_c)
