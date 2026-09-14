@@ -260,3 +260,68 @@ def test_the_two_jobs_use_different_search_radii_on_purpose():
     src = inspect.getsource(infer_plot_scale)
     assert "search_mm=8.0" in src, (
         "inference must pass its own tight radius, not inherit the linking default")
+
+
+# =====================================================================================
+# THE SURVEY SCHEDULE. Dimensions say how big a thing is; only a NORTHING/EASTING schedule
+# says WHERE it goes. These fixtures mirror the layout measured on the real L201B, which the
+# repo cannot carry.
+# =====================================================================================
+def _sched_words(rows, rotated: bool):
+    """A schedule laid out either upright or turned 90 degrees on the page."""
+    ws = []
+    for r, (pid, desc, n, e) in enumerate(rows):
+        toks = [str(pid)] + desc.split() + ["N", n, "E", e]
+        for t, tok in enumerate(toks):
+            along, across = t * 16.0, r * 8.0       # 16mm between cells, from the real sheet
+            ws.append({"text": tok,
+                       "x": along if not rotated else across,
+                       "y": -across if not rotated else -along})
+    return ws
+
+
+_ROWS = [(21, "WEST ENTRY MONUMENT", "2068137.9965", "414321.8101"),
+         (22, "WEST ENTRY MONUMENT", "2068139.3216", "414321.6075"),
+         (27, "WEST ENTRY MONUMENT", "2068125.5657", "414371.1075")]
+
+
+def test_a_survey_schedule_is_read_whichever_way_the_table_is_turned():
+    """ON THE REAL SHEET IT WAS ROTATED. Every one of L201B's ten eastings shares a single y
+    and has its own x: what a reader sees as rows running down the page are, in page
+    coordinates, columns running across it. A landscape sheet turns its schedules as readily
+    as its title block, so the axis is found rather than assumed."""
+    from app.pdf_import import parse_point_schedule
+    for rotated in (False, True):
+        pts = {p["id"]: p for p in parse_point_schedule(_sched_words(_ROWS, rotated))}
+        assert set(pts) == {21, 22, 27}, f"rotated={rotated} lost rows: {sorted(pts)}"
+        assert pts[21]["northing"] == pytest.approx(2068137.9965)
+        assert pts[21]["easting"] == pytest.approx(414321.8101)
+        assert "WEST ENTRY MONUMENT" in pts[27]["description"]
+
+
+def test_title_block_text_sharing_a_band_stays_out_of_the_schedule():
+    """A band spans the whole sheet. On the real L201B the descriptions came back carrying
+    'CHECKED BY: DEP' and 'SHEET NUM', and one point lost its id to a plot timestamp. Within a
+    record the gaps measured 10-20mm; the jump to the title block was 38mm."""
+    from app.pdf_import import parse_point_schedule
+    ws = _sched_words(_ROWS, rotated=True)
+    for r in range(3):                      # title block, far along the same band
+        for k, tok in enumerate(("L201B", "SCALE:", "AS", "NOTED")):
+            ws.append({"text": tok, "x": r * 8.0, "y": -(200.0 + k * 40.0)})
+    pts = {p["id"]: p for p in parse_point_schedule(ws)}
+    assert set(pts) == {21, 22, 27}
+    for p in pts.values():
+        for junk in ("L201B", "SCALE", "NOTED"):
+            assert junk not in p["description"], f"title block leaked in: {p['description']!r}"
+
+
+def test_half_a_coordinate_is_not_a_point():
+    """A sheet is covered in numbers — dimensions, radii, elevations, sheet references. Only
+    the ones sharing a band with BOTH a northing and an easting are survey points, and
+    requiring the pair is what keeps a dimension out of the placement data."""
+    from app.pdf_import import parse_point_schedule
+    ws = _sched_words([(21, "WEST ENTRY MONUMENT", "2068137.9965", "414321.8101")], rotated=True)
+    assert len(parse_point_schedule(ws)) == 1
+    only_n = [w for w in ws if w["text"] not in ("E", "414321.8101")]
+    assert parse_point_schedule(only_n) == [], "a northing alone is not a location"
+    assert parse_point_schedule([]) == [] and parse_point_schedule(None) == []
