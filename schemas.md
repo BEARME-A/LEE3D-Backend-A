@@ -1835,6 +1835,151 @@ such limit and will run it.** Worth knowing that the level-base cut pushed this 
 to ~4:50 — it is now the slowest thing in the repo.
 
 ======================================================================
+## THE REAL DRAWINGS RAN THROUGH IT. 2026-08-30. What held and what did not.
+======================================================================
+_Dylan's actual `Drawings.pdf` — 8 pages, 16.4 MB, the Saratoga Springs permit set. Everything
+below is measured on that file, not on a fixture._
+
+### IT PARSES, AND THE IMPERIAL READING WORKS ON REAL SHEETS
+    page 0  L201B  48,932 strokes    595 words   scale 240 (1"=20'-0")    96 dimensions read
+    page 2  L301B  48,604 strokes    334 words   scale 240                30
+    page 4  L403   16,234 strokes    349 words   scale  96 (1/8"=1'-0")   46
+    page 6  L405   23,457 strokes  3,411 words   scale  12 (1"=1'-0")    204
+    page 7  L406 163,293 strokes  1,530 words   scale None              275
+
+Pages 3, 5 and 7 report no printed scale, which is CORRECT — those sheets carry several. Over
+a thousand dimensions read across the set.
+
+**Dimensions link to real line work.** On L403's monument sheet, 30'-0" matched a drawn 95.25mm
+at **0.00% error**, and three separate 5'-0" at 0.00-0.08%. On L201B the 155'-7" right-of-way
+matched at 1.62%.
+
+### WHERE IT WAS WRONG, AND THE REAL SHEET IS WHAT SHOWED IT
+**`search_mm` defaulted to 40mm, and on a real sheet that is meaningless.** L404 carries 59,794
+strokes; within 40mm of any dimension text there is a stroke of nearly the right length AT
+ALMOST ANY SCALE. Sweeping candidates on that page:
+
+    search 40 mm -> true 1:48 wins 126 to 121.   a 4% lead. Right answer, and luck.
+    search 15 mm -> 76 to 32     lead 138%
+    search  8 mm -> 59 to 14     lead 321%
+    search  4 mm -> 42 to  4     lead 950%
+
+**Match QUALITY does not rescue it, and I checked before assuming.** At 40mm the WRONG
+candidate 1:200 had a LOWER mean error (0.379% against 0.488%) and MORE sub-0.2% matches (83
+against 71) than the true scale. Scoring by fit would have chosen wrongly. Only proximity
+separates them.
+
+### THE FIX IS TWO RADII, NOT ONE
+Tightening the shared default to 12mm cost L201B more than half its true matches — 26 down to
+10 — for no gain, because **when the scale is KNOWN the length check is already doing the work**
+and a generous radius simply finds more real dimensions. When the scale is being GUESSED there
+is no length check yet, only a comparison, and then the radius is the entire discriminator.
+
+    link_dimensions   search_mm = 25.0     finding dimensions at a known scale
+    infer_plot_scale  passes 8.0 itself    choosing between candidate scales
+
+    after: L201B 21 linked, L403 17 linked, L404 inferred 1:48 with 92 linked, L400 nothing
+
+`infer_plot_scale` also now requires a LEAD rather than a win (`min_lead=1.5`). A 4% margin over
+a pile of coincidences is not evidence.
+
+    72 passed, 20 skipped  |  schema checker clean
+    (the 20 skips are the kernel tests — cadquery is not installed after a container reset)
+
+### ONE SHAPE FOR A SHEET — `read_sheet()` + `LEE3D-Lib/schema/sheet.schema.json`, 2026-08-30
+The parsers grew one at a time and each returned its own thing. **This is the shape they agree
+on**, published in the Lib beside `profile.schema.json` for the same reason that one exists:
+two ends reading a drawing five different ways is how they drift.
+
+    {page, sheet, scale, counts, dimensions, points}   strokes/words optional, omitted by default
+
+`scale` keeps **both inputs beside the answer** — `printed`, `inferred`, `used` — so a
+disagreement is visible rather than resolved silently. `used` is what a caller builds with.
+
+### THE WHOLE REAL SET, MACHINE-READ
+    page  sheet   status                      scale  from       dims  points
+      0   L201B   BID/ PERMIT SET             240.0  printed      21     10
+      1   —       —                            —     —             0      0     (raster master plan)
+      2   L301B   BID/ PERMIT SET             240.0  printed       1      0
+      3   L400    FOR CONSTRUCTION             —     —             0      0     (schedule, no drawing)
+      4   L403    CONSTRUCTION DOCUMENT SET    96.0  printed      17      0
+      5   L404    FOR CONSTRUCTION             48.0  INFERRED     92      0
+      6   L405    PERMIT SET                   12.0  printed       4      0
+      7   L406    CONSTRUCTION DOCUMENT SET    48.0  INFERRED     87      0
+
+Every sheet identified, every status right. **L404 and L406 both inferred 1:48 with no printed
+scale — and both ARE 1/4"=1'-0" detail sheets.** Page 1 is the rasterised master plan and
+correctly yields nothing; page 3 is the materials schedule and has no drawing to scale.
+
+**The sheet number is found by TEXT SIZE, not position.** A title block prints it larger than
+anything else, and that holds when the block is rotated with the sheet — which on this set it
+is. A position rule breaks there. Null rather than a guess, because a wrong number silently
+mis-resolves every cross-reference on the page: the materials schedule points at "2/L403"
+meaning detail 2 on sheet L403, and a wrong number lands that somewhere else entirely.
+
+**A MUTATION THAT PASSED, FOR THE SECOND TIME THIS SESSION.** Changing "largest" to
+"first seen" did not fail the size test — because the fixture listed the real sheet FIRST, so
+both rules gave the same answer. Reordered so the small callout comes first, and the mutant now
+fails. **This is the same failure as the dimension decoy: a test whose fixture lets the wrong
+rule succeed proves nothing.** Worth checking the ORDER of a fixture, not just its contents.
+
+    78 passed, 20 skipped  |  schema checker clean
+
+### THE SURVEY SCHEDULE IS READ — `parse_point_schedule()`, 2026-08-30
+Ten points off the real L201B. **All ten northings and eastings exact**, 8 of 10 ids, clean
+descriptions. This is placement data — dimensions say how big a thing is, only the schedule
+says where it goes — and typing ten coordinates at four decimals by hand is the transcription
+this importer exists to remove.
+
+**THE TABLE WAS ROTATED, AND THAT IS NORMAL.** Every one of L201B's ten eastings shares a
+single y and has its own x: what a reader sees as rows running down the page are, in page
+coordinates, columns running across it. A landscape sheet turns its schedules as readily as its
+title block. So the axis is not assumed — both are tried and the one yielding more COMPLETE
+records wins, a record being complete only with both a northing and an easting. Mutation-checked
+by assuming upright, which fails the rotated case.
+
+**A band spans the whole sheet, so it sweeps in whatever shares that line.** First run, the
+descriptions came back carrying "CHECKED BY: DEP", "SHEET NUM" and a plot timestamp, and point
+26 lost its id to it. Fixed by keeping only the contiguous run reached by walking BACK from the
+first coordinate — which drops the trailing title block for free, since it is never visited.
+
+**The 25mm gap was measured, not guessed.** The real band for point 21 reads:
+
+    -91.8 '21'   -72.3 'WEST'   -62.0 'ENTRY'   -45.6 'MONUMENT'   -25.4 'N'
+    -11.9 '2068137.9965'   6.8 'E'   19.0 '414321.8101'   ||   57.3 'L201B'   236.5 'SCALE:'
+
+Gaps within the record run 10-20mm; the jump to the title block is 38mm. 25 sits between them.
+**A first attempt at 14mm kept nothing at all** — it stopped at the first 20mm gap, and the
+result was ten perfect coordinates with every id and description blank. Reading one real band
+took a minute and settled it; a third guess would not have.
+
+**Known and honest: the description is the FIRST LINE only.** The schedule wraps "COLUMN CL"
+and "WALL CL/ COLUMN INTERSECTION" onto a second line, which lands in a different band. The
+ids and coordinates — the parts that place anything — are exact. Points 1 and 2 also lose their
+single-digit ids; the coordinates are right.
+
+    75 passed, 20 skipped  |  schema checker clean
+    (the skips are kernel tests — cadquery is not installed after the container reset)
+
+### AUDIT ON RESTORE FOUND A MISSING FILE — since rebuilt, 2026-08-30
+Every shipped file matched its md5 except `test/core.test.mjs`, at 6af0ea02 when it should have
+been fdcf3bfa. The circularity work shipped as a PAIR — `index.html` carrying
+`outlineCircularity`, and `core.test.mjs` carrying its test — and only the first landed. The
+function was live and untested for several turns.
+
+**Rebuilt and gated: 279 of 279.** The NAMES entry and the test are back, and `index.html` is
+untouched at 8c6da036 — the audit is what caught this, which is the whole reason rule 3 asks
+for md5s against the repo rather than against what I think I shipped.
+
+**Proved it bites before shipping it.** Setting the perimeter sampler's `N = 96` to `N = 0` —
+i.e. back to measuring vertices — fails the test with `RESULT: FAIL — do not ship`. A restored
+test that passed without being able to fail would have been worse than the gap it filled.
+
+**When two files must change together, ship them together.** This is the second time in this
+file that a pair has half-landed; the other was a test and its md5 record. A feature and the
+test that constrains it are one change.
+
+======================================================================
 ## READING A DRAWING FILE — the backend already had most of it. 2026-08-30.
 ======================================================================
 _Collin: a file should be read properly without manual input; tracing and manual boxes keep
