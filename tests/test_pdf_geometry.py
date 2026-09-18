@@ -325,3 +325,54 @@ def test_half_a_coordinate_is_not_a_point():
     only_n = [w for w in ws if w["text"] not in ("E", "414321.8101")]
     assert parse_point_schedule(only_n) == [], "a northing alone is not a location"
     assert parse_point_schedule([]) == [] and parse_point_schedule(None) == []
+
+
+# =====================================================================================
+# ONE SHAPE FOR A SHEET. The parsers grew one at a time and each returned its own thing;
+# `read_sheet` is the shape they agree on, and LEE3D-Lib/schema/sheet.schema.json is the
+# contract. Two ends reading a drawing five different ways is how they drift.
+# =====================================================================================
+def test_the_sheet_number_is_found_by_size_not_position():
+    """A title block prints its sheet number larger than anything else on the page, and that
+    holds when the block is rotated with the sheet — which on this set it is. A position rule
+    breaks there; a size rule does not."""
+    from app.pdf_import import sheet_identity
+    # THE SMALL CALLOUT COMES FIRST ON PURPOSE. With the real sheet listed first, "take the
+    # largest" and "take the first you see" give the same answer, and the test proves nothing —
+    # a mutation to first-seen passed it. Order the fixture so only the size rule can pass.
+    words = [{"text": "L219", "x": 50, "y": 300, "box": [48, 299, 56, 302]},  # 3mm, a callout
+             {"text": "L201B", "x": 10, "y": 10, "box": [8, 6, 20, 14]},      # 8mm, the sheet
+             {"text": "BID/ PERMIT SET", "x": 10, "y": 2, "box": [5, 1, 30, 3]}]
+    got = sheet_identity(words)
+    assert got["number"] == "L201B", "the larger of two candidates is the sheet"
+    assert got["status"] == "BID/ PERMIT SET"
+
+
+def test_no_sheet_number_is_reported_as_none_not_guessed():
+    """A wrong sheet number silently mis-resolves every cross-reference on the page — a
+    materials schedule pointing at '2/L403' lands somewhere else entirely. Absent makes a
+    caller ask; wrong does not."""
+    from app.pdf_import import sheet_identity
+    got = sheet_identity([{"text": "SARATOGA", "x": 1, "y": 1, "box": [0, 0, 9, 4]}])
+    assert got["number"] is None and got["status"] is None
+    assert sheet_identity([])["number"] is None and sheet_identity(None)["number"] is None
+
+
+def test_a_read_sheet_result_matches_the_published_contract():
+    """The shape is published in LEE3D-Lib so the studio reads a sheet the same way the backend
+    writes one. If this drifts, the two ends disagree about what a drawing IS."""
+    import json, pathlib
+    for base in (pathlib.Path(__file__).resolve().parents[2],
+                 pathlib.Path(__file__).resolve().parents[1].parent):
+        cand = base / "LEE3D-Lib" / "schema" / "sheet.schema.json"
+        alt = base / "LEE3D-Lib-main" / "schema" / "sheet.schema.json"
+        for path in (cand, alt):
+            if path.exists():
+                schema = json.loads(path.read_text())
+                required = set(schema["required"])
+                assert required == {"page", "sheet", "scale", "counts", "dimensions", "points"}
+                for k in ("printed", "inferred", "used"):
+                    assert k in schema["properties"]["scale"]["properties"], (
+                        f"the contract must keep both scale inputs beside the answer; {k} missing")
+                return
+    pytest.skip("LEE3D-Lib not checked out beside this repo")
