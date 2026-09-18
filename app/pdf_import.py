@@ -537,3 +537,78 @@ def parse_point_schedule(words) -> List[Dict]:
     by_y = _points_from_bands(_bands(words, "y"), "y")
     by_x = _points_from_bands(_bands(words, "x"), "x")
     return by_x if len(by_x) > len(by_y) else by_y
+
+
+# ----------------------------------------------------------------------------------------
+# WHICH SHEET IS THIS? A drawing set cross-references itself constantly — the materials
+# schedule points at "2/L403" meaning detail 2 on sheet L403, and a section marker points at
+# another sheet entirely. None of that resolves without knowing which sheet you are holding.
+#
+# The sheet number is found by SIZE, not position. It is the largest text on the page matching
+# a sheet pattern, because a title block prints it bigger than anything else on the sheet — and
+# that holds whether the block sits bottom-right, is rotated with the sheet, or has been moved
+# by whoever set the template up. Position rules break on a rotated title block; size does not.
+# ----------------------------------------------------------------------------------------
+_SHEET_NO_RE = re.compile(r"^[A-Z]{1,3}-?\d{2,4}[A-Z]?$")
+
+# statuses a construction set prints on itself, longest first so the specific wins
+_STATUS_PHRASES = ("FOR CONSTRUCTION", "CONSTRUCTION DOCUMENT SET", "BID/ PERMIT SET",
+                   "BID/PERMIT SET", "PERMIT SET", "NOT FOR CONSTRUCTION")
+
+
+def _text_height(w) -> float:
+    b = w.get("box")
+    return abs(b[3] - b[1]) if b and len(b) >= 4 else 0.0
+
+
+def sheet_identity(words) -> Dict:
+    """Sheet number and any printed status. Number by size; status by phrase.
+
+    Returns None for anything it cannot find rather than a best guess: a wrong sheet number
+    silently mis-resolves every cross-reference on the page, which is worse than an absent one
+    that makes a caller ask.
+    """
+    best = None
+    for w in words or []:
+        t = (w.get("text") or "").strip().upper()
+        if not _SHEET_NO_RE.match(t):
+            continue
+        h = _text_height(w)
+        if best is None or h > best[0]:
+            best = (h, t)
+    blob = " ".join((w.get("text") or "") for w in (words or [])).upper()
+    status = next((p for p in _STATUS_PHRASES if p in blob), None)
+    return {"number": best[1] if best else None,
+            "number_text_height": round(best[0], 2) if best else None,
+            "status": status}
+
+
+def read_sheet(data: bytes, page_index: int = 0, want_geometry: bool = False) -> Dict:
+    """Everything this module can tell you about one plotted page, in one shape.
+
+    The parsers grew one at a time and each returned its own thing. This is the shape they
+    agree on, so a caller — and the studio at the other end — has one contract to read rather
+    than five, which is how the two ends of this project stay in step.
+
+    `scale.used` is what a caller should build with: the printed ratio when the sheet states
+    one, otherwise the ratio inferred from the line work, otherwise None. Both inputs are kept
+    alongside it so a disagreement is visible rather than resolved silently.
+    """
+    g = extract_geometry(data, page_index=page_index)
+    words, strokes = g.get("words", []), g.get("strokes", [])
+    printed = g.get("plot_scale")
+    inferred = None if printed else infer_plot_scale(strokes, words)
+    used = printed or inferred
+    out = {
+        "page": {"index": page_index,
+                 "width_mm": g.get("width_mm") or g.get("page_width_mm"),
+                 "height_mm": g.get("height_mm") or g.get("page_height_mm")},
+        "sheet": sheet_identity(words),
+        "scale": {"printed": printed, "inferred": inferred, "used": used},
+        "counts": {"strokes": len(strokes), "words": len(words)},
+        "dimensions": link_dimensions(strokes, words, used) if used else [],
+        "points": parse_point_schedule(words),
+    }
+    if want_geometry:
+        out["strokes"], out["words"] = strokes, words
+    return out
