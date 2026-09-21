@@ -370,9 +370,353 @@ def test_a_read_sheet_result_matches_the_published_contract():
             if path.exists():
                 schema = json.loads(path.read_text())
                 required = set(schema["required"])
-                assert required == {"page", "sheet", "scale", "counts", "dimensions", "points"}
+                assert required == {"page", "sheet", "scale", "counts", "details",
+                                    "dimensions", "points"}
                 for k in ("printed", "inferred", "used"):
                     assert k in schema["properties"]["scale"]["properties"], (
                         f"the contract must keep both scale inputs beside the answer; {k} missing")
                 return
     pytest.skip("LEE3D-Lib not checked out beside this repo")
+
+
+# =====================================================================================
+# SURVEY POINTS -> SOMETHING PLACEABLE. A schedule gives seven-digit state-plane feet, offset
+# from a datum hundreds of miles away. A model needs LOCAL millimetres from a chosen origin at
+# the ratio it is being built to. The coordinates below are the real West Entry Monument.
+# =====================================================================================
+_REAL_POINTS = [
+    {"id": 21, "description": "WEST ENTRY MONUMENT", "northing": 2068137.9965, "easting": 414321.8101},
+    {"id": 22, "description": "WEST ENTRY MONUMENT", "northing": 2068139.3216, "easting": 414321.6075},
+    {"id": 27, "description": "WEST ENTRY MONUMENT", "northing": 2068125.5657, "easting": 414371.1075},
+]
+
+
+def test_a_span_between_survey_points_matches_the_hand_reduction():
+    """Reduced by hand off the photographed schedule before the PDF arrived: 50.84 ft at
+    104.15 degrees. The parsed-and-computed answer has to be the same number."""
+    from app.pdf_import import survey_span
+    s = survey_span(_REAL_POINTS, 21, 27)
+    assert s["distance_ft"] == pytest.approx(50.8405, abs=1e-3)
+    assert s["distance_mm"] == pytest.approx(15496, abs=1.0)
+    assert s["bearing_deg_from_north"] == pytest.approx(104.1526, abs=1e-3)
+    assert survey_span(_REAL_POINTS, 21, 999) is None, "an unknown point is not an answer"
+
+
+def test_bearing_is_clockwise_from_north_the_way_a_drawing_states_it():
+    """NOT the mathematical convention of counter-clockwise from east. Getting this backwards
+    puts a monument across the road from where it belongs, and both conventions produce a
+    plausible-looking number, so nothing downstream would catch it."""
+    from app.pdf_import import survey_span
+    due_east = [{"id": 1, "northing": 1000.0, "easting": 0.0},
+                {"id": 2, "northing": 1000.0, "easting": 100.0}]
+    assert survey_span(due_east, 1, 2)["bearing_deg_from_north"] == pytest.approx(90.0)
+    due_north = [{"id": 1, "northing": 0.0, "easting": 500.0},
+                 {"id": 2, "northing": 100.0, "easting": 500.0}]
+    assert survey_span(due_north, 1, 2)["bearing_deg_from_north"] == pytest.approx(0.0)
+
+
+def test_the_model_ratio_is_given_not_taken_from_the_sheet():
+    """PLOT SCALE IS NOT MODEL SCALE. A sheet plotted at 1"=20'-0" is a statement about PAPER;
+    the model may be built at any ratio for reasons that have nothing to do with printing. So
+    the ratio is a parameter, and halving it halves the model."""
+    from app.pdf_import import survey_layout
+    at100 = survey_layout(_REAL_POINTS, 100, origin_id=21)
+    at200 = survey_layout(_REAL_POINTS, 200, origin_id=21)
+    assert at100["extent_mm"]["x"] == pytest.approx(at200["extent_mm"]["x"] * 2, rel=1e-6)
+    assert at100["origin"]["id"] == 21
+    by21 = {p["id"]: p for p in at100["points"]}
+    assert by21[21]["x_mm"] == 0.0 and by21[21]["y_mm"] == 0.0, "the origin sits at zero"
+
+
+def test_the_origin_is_reported_so_nobody_has_to_guess_which_point_it_was():
+    from app.pdf_import import survey_layout
+    fallback = survey_layout(_REAL_POINTS, 100, origin_id=999)
+    assert fallback["origin"]["id"] == 21, "an unknown origin falls back to the first point"
+    assert survey_layout([], 100)["points"] == []
+    assert survey_layout(_REAL_POINTS, 0)["model_scale"] == 1.0, "a zero ratio must not divide"
+
+
+def test_a_detail_bubble_number_does_not_become_part_of_the_scale():
+    """FOUND ON THE REAL L406. A scale text is searched across several word runs, because a
+    plotted sheet breaks `1/4" = 1'-0"` into separate ones. That search also swallows the
+    DETAIL BUBBLE NUMBER sitting just before it: bubble 1 gave `1 1/4" = 1'-0"` and a
+    valid-looking 1:9.6; bubbles 2 and 3 gave 1:5.33 and 1:3.69.
+
+    Those readings polluted the sheet's scale set and made L404 look ambiguous — it reported no
+    printed scale at all and had to fall back on inference. Requiring a ratio someone actually
+    plots at rejects all three and keeps every real one."""
+    from app.pdf_import import parse_arch_scale
+    for junk in ('1 1/4" = 1\'-0"', '2 1/4" = 1\'-0"', '3 1/4" = 1\'-0"'):
+        assert parse_arch_scale(junk) is None, f"{junk} is a bubble number plus a scale"
+    # the arithmetic itself was never wrong — it is the standard-ratio filter doing the work
+    assert parse_arch_scale('1 1/4" = 1\'-0"', standard_only=False) == pytest.approx(9.6)
+    for real, want in (('1/4" = 1\'-0"', 48), ('3/8" = 1\'-0"', 32), ('1/8" = 1\'-0"', 96),
+                       ('1" = 20\'-0"', 240), ('1" = 1\'-0"', 12), ('3" = 1\'-0"', 4),
+                       ('1/2" = 1\'-0"', 24), ('1/16" = 1\'-0"', 192)):
+        assert parse_arch_scale(real) == pytest.approx(want), f"{real} is a real scale"
+
+
+def test_a_scale_comes_back_clean_not_as_float_noise():
+    """1/4" = 1'-0" was returning 48.00000000000001, which reaches a caller and an API response
+    looking like a measurement rather than a ratio."""
+    from app.pdf_import import parse_arch_scale
+    assert repr(parse_arch_scale('1/4" = 1\'-0"')) == "48.0"
+    assert repr(parse_arch_scale('1/8" = 1\'-0"')) == "96.0"
+
+
+# =====================================================================================
+# WHAT IS ON THIS SHEET. A details sheet is not one drawing — the real L406 carries nine, and
+# they are NOT all at one scale: eight column sections at 1/4"=1'-0" and a wayfinding sign at
+# 3/8". Treating such a sheet as having a single scale is wrong on its face.
+# =====================================================================================
+def _detail(title, scale_toks, x, y, step=6.0):
+    """A detail as a rotated sheet lays it out: the title in one band, its scale one line over.
+    Measured on the real L406 — title words at x 32.6, scale at x 24.2."""
+    ws = [{"text": t, "x": x + 8.4, "y": y - k * step, "box": [0, 0, 8, 20]}
+          for k, t in enumerate(title.split())]
+    ws += [{"text": t, "x": x, "y": y - k * step, "box": [0, 0, 3, 6]}
+           for k, t in enumerate(scale_toks)]
+    return ws
+
+
+def test_every_titled_detail_on_a_sheet_is_found_with_its_own_scale():
+    from app.pdf_import import find_details
+    ws = (_detail("MAIN COLUMN FRONT ELEVATION", ['1/4"', "=", "1'-0\""], 24.2, 115.3)
+          + _detail("WAYFINDING SIGN", ['3/8"', "=", "1'-0\""], 205.2, 115.3))
+    got = {d["title"]: d["scale"] for d in find_details(ws)}
+    assert got == {"MAIN COLUMN FRONT ELEVATION": 48.0, "WAYFINDING SIGN": 32.0}, (
+        "a sheet may mix scales and both must survive — L406 does exactly this")
+
+
+def test_a_scale_bar_and_a_north_arrow_are_not_details():
+    """FOUND ON THE REAL L201B. A plan sheet prints its scale under a scale bar and a north
+    arrow, and reading a title back from those gave two phantom details, "N" and "SCALE:". A
+    label ends in a colon; a north arrow is one letter. A real title is neither."""
+    from app.pdf_import import find_details
+    # EACH IN ITS OWN COLUMN, as the real sheet lays them out — L406's anchors sit at
+    # x 24.2, 205.2, 394.6. Sharing one x made the second walk-back collect the FIRST
+    # detail's scale text as its title, which is a fixture artefact and not a real layout.
+    ws = (_detail("N", ['1"', "=", "20'-0\""], 24.2, 100.0)
+          + _detail("SCALE:", ['1"', "=", "20'-0\""], 205.2, 100.0))
+    assert find_details(ws) == [], "a plan sheet has no titled details"
+
+
+def test_a_single_word_detail_survives_the_filter():
+    """LOGO is detail 10 on the real L404. A two-word rule would have dropped it, which is why
+    the filter tests for a label rather than for word count."""
+    from app.pdf_import import find_details
+    got = find_details(_detail("LOGO", ['1/4"', "=", "1'-0\""], 24.2, 50.0))
+    assert [d["title"] for d in got] == ["LOGO"]
+
+
+def test_each_detail_is_measured_at_its_own_scale_not_the_sheets():
+    """THE REAL L406 MIXES SCALES: eight column sections at 1/4"=1'-0" and a wayfinding sign at
+    3/8". Measuring the sign at the sheet's 1:48 understates it by a third, the arithmetic
+    check then rejects the match, and the sign's dimensions VANISH rather than arrive wrong —
+    which is worse, because nothing signals a problem. Per detail, they came back: six of them,
+    three at 0.00% error."""
+    from app.pdf_import import link_dimensions_by_detail
+    details = [{"title": "COLUMN", "scale": 48.0, "x": 0.0, "y": 0.0},
+               {"title": "SIGN", "scale": 32.0, "x": 500.0, "y": 0.0}]
+    strokes, words = [], []
+    strokes.append(_ln(0, 0, 1219.2 / 48.0, 0))                    # 4'-0" at 1:48
+    words.append({"text": "4'-0\"", "x": 1219.2 / 48.0 / 2, "y": 2.0})
+    strokes.append(_ln(500, 0, 500 + 1219.2 / 32.0, 0))            # 4'-0" at 1:32
+    words.append({"text": "4'-0\"", "x": 500 + 1219.2 / 32.0 / 2, "y": 2.0})
+    got = link_dimensions_by_detail(strokes, words, details, 48.0)
+    by = {m["detail"]["title"]: m for m in got}
+    assert set(by) == {"COLUMN", "SIGN"}, "both details must yield their dimension"
+    assert by["SIGN"]["detail"]["scale"] == 32.0
+    assert all(m["error"] < 1e-6 for m in got), "each measured at its own scale is exact"
+    # the sheet scale alone finds only the one drawn at it
+    from app.pdf_import import link_dimensions
+    assert len(link_dimensions(strokes, words, 48.0)) == 1, (
+        "a single sheet scale loses the other detail entirely — that is the bug")
+
+
+def test_a_sheet_with_no_titled_details_falls_back_to_the_sheet_scale():
+    """A plan sheet has no details. It must behave exactly as before, and say so by reporting
+    a null detail rather than inventing one."""
+    from app.pdf_import import link_dimensions_by_detail
+    strokes = [_ln(0, 0, 1219.2 / 240.0, 0)]
+    words = [{"text": "4'-0\"", "x": 1219.2 / 240.0 / 2, "y": 1.0}]
+    got = link_dimensions_by_detail(strokes, words, [], 240.0)
+    assert len(got) == 1 and got[0]["detail"] is None
+    assert link_dimensions_by_detail(strokes, words, [], None) == []
+
+
+# =====================================================================================
+# WHICH STROKES BELONG TO WHICH DETAIL. A sheet holds 163,293 of them and nine details; a
+# builder needs the few thousand that are one column. THE SHEET DRAWS THE ANSWER — a details
+# sheet frames each detail, and on the real L406 the frames are an exact 181.0 x 368.3mm grid.
+# =====================================================================================
+def _rect(x0, y0, w, h):
+    return [[x0, y0], [x0 + w, y0], [x0 + w, y0 + h], [x0, y0 + h], [x0, y0]]
+
+
+def test_frames_are_found_and_the_outer_border_is_dropped_by_containment():
+    """Dropping the LARGEST rectangle would also drop a legitimately large detail on a sheet
+    with no border. The border is the one that holds the others."""
+    from app.pdf_import import detail_frames
+    strokes = [_rect(0, 0, 725, 952),          # the border
+               _rect(19, 0, 181, 368), _rect(200, 0, 181, 368),
+               _rect(5, 5, 10, 10)]            # too small to be a frame
+    got = detail_frames(strokes)
+    assert len(got) == 2, f"border and crumbs must go, frames must stay: {len(got)}"
+    assert all(abs(f["w"] - 181) < 1 for f in got)
+
+
+def test_every_detail_lands_in_exactly_one_frame_and_no_frame_takes_two():
+    """MEASURED ON L406, AND THE PADDING WAS THE WHOLE FAULT:
+         pad  0mm -> 9 of 9 details inside exactly one frame
+         pad 12mm -> 3 of 9, with SIX inside several
+    Frames abut with no gutter, so any padding puts an anchor inside its neighbour too. That
+    caused one detail to claim two frames while two others got none."""
+    from app.pdf_import import segment_by_frame
+    strokes = [_rect(0, 0, 181, 368), _rect(181, 0, 181, 368)]
+    # ANCHORS SIT NEAR THEIR FRAME'S EDGE, as on the real sheet: L406's frame starts at
+    # x 19.4 and its scale text is at x 24.2, FOUR POINT EIGHT mm inside. A fixture with 20mm
+    # of clearance survives a 12mm padding and proves nothing — the mutation passed it.
+    details = [{"title": "COLUMN", "scale": 48.0, "x": 5.0, "y": 20.0},
+               {"title": "SIGN", "scale": 32.0, "x": 186.0, "y": 20.0}]
+    segs = segment_by_frame(strokes, details)
+    titles = [s["title"] for s in segs if s["title"]]
+    assert sorted(titles) == ["COLUMN", "SIGN"], f"one each, got {titles}"
+    assert len(titles) == len(set(titles)), "no detail may claim two frames"
+
+
+def test_a_frame_with_no_title_keeps_its_geometry():
+    """On a real sheet an untitled frame is a detail whose title did not parse. Dropping it
+    would discard that geometry silently, which is the failure this whole module exists to
+    avoid — an absent answer looks like an empty sheet."""
+    from app.pdf_import import segment_by_frame
+    strokes = [_rect(0, 0, 181, 368), _ln(20, 20, 60, 60)]
+    segs = segment_by_frame(strokes, [])
+    assert len(segs) == 1 and segs[0]["title"] is None
+    assert segs[0]["strokes"], "the strokes inside it are still reported"
+
+
+# =====================================================================================
+# CROPPING ONE DETAIL FOR A PERSON TO TRACE. The silhouette cannot be extracted automatically
+# — a construction detail draws the thing IN ITS CONTEXT, and on L406 the ink covers six times
+# the object's area. So the trace stays, and this is what makes it cheap.
+# =====================================================================================
+def test_a_plan_sheet_is_not_offered_as_a_detail_to_trace():
+    """MEASURED: L201B and L400 each yield two frames — the 725 x 951.8mm sheet border and a
+    61mm seal box. Neither contains the other, so containment drops neither and both survive
+    untitled. Handing a whole site plan back as "detail 0" would be worse than a 404.
+
+    The refusal is STRUCTURAL rather than a special case: the listing carries only TITLED
+    details, so a plan sheet produces an empty list and there is nothing to index. That is the
+    better shape — a guard that has to recognise a plan sheet is a guard that can fail to."""
+    import inspect
+    from app.main import import_pdf_detail
+    src = inspect.getsource(import_pdf_detail)
+    assert 'sheet["details"]' in src and "if not segs:" in src, (
+        "an empty listing must refuse by itself, without a special case for plan sheets")
+
+
+
+
+# =====================================================================================
+# A REAL PDF, BUILT IN THE TEST. The checks above for rotation and for the endpoints were
+# source-string assertions — they would survive a rewrite that kept the strings and broke the
+# behaviour. PyMuPDF can WRITE a PDF, so the fixture is a genuine one: a framed detail with a
+# title, its own scale, and a dimension of known length, rendered at rotation 0 and 270.
+#
+# **ROTATION 270 IS THE POINT.** Every sheet in the real set carries it, and it hid a y-flip
+# bug through the entire build: nothing RELATIVE could see a uniform 304.8mm offset. With the
+# flip reverted, the upright page still passes and the rotated one returns a crop 892px wide
+# where 1960 is right — which is exactly how the bug behaved.
+# =====================================================================================
+def _sheet_pdf(rotation: int = 0) -> bytes:
+    fitz = pytest.importorskip("fitz")
+    from app.pdf_import import PT_MM
+    doc = fitz.open()
+    page = doc.new_page(width=2160, height=3024)        # the shape of a real mediabox here
+    page.draw_rect(fitz.Rect(100, 100, 700, 1500), color=(0, 0, 0), width=1)
+    page.insert_text((120, 1400), "MAIN COLUMN FRONT ELEVATION", fontsize=14)
+    page.insert_text((120, 1430), '1/4" = 1\'-0"', fontsize=9)
+    L = 1219.2 / 48.0 / PT_MM                            # 4'-0" at 1:48, in points
+    page.draw_line(fitz.Point(200, 400), fitz.Point(200 + L, 400), color=(0, 0, 0), width=1)
+    page.insert_text((200 + L / 2 - 10, 392), "4'-0\"", fontsize=8)
+    if rotation:
+        page.set_rotation(rotation)
+    return doc.tobytes()
+
+
+@pytest.mark.parametrize("rotation", [0, 270])
+def test_a_whole_sheet_reads_end_to_end_at_either_rotation(rotation):
+    from app.pdf_import import read_sheet
+    sh = read_sheet(_sheet_pdf(rotation), page_index=0)
+    assert len(sh["details"]) == 1
+    d = sh["details"][0]
+    assert d["title"] == "MAIN COLUMN FRONT ELEVATION" and d["scale"] == pytest.approx(48.0)
+    assert d["frame"], "a listed detail carries the frame its geometry lives in"
+    assert len(sh["dimensions"]) == 1
+    m = sh["dimensions"][0]
+    assert m["mm"] == pytest.approx(1219.2) and m["error"] < 1e-6
+    assert m["detail"]["title"] == "MAIN COLUMN FRONT ELEVATION"
+
+    # THE FRAME'S ABSOLUTE POSITION, which is the only thing that catches the y flip.
+    # The fixture draws it at PDF points (100, 100, 700, 1500) on an unrotated page 3024 tall,
+    # and our millimetres measure y UPWARD from the page bottom, so:
+    #     y0 = (3024 - 1500) * PT_MM = 537.8    y1 = (3024 - 100) * PT_MM = 1031.9
+    # Flipping against `page.rect.height` (2160 on this rotated page) shifts every y by
+    # 304.8mm. **Nothing relative can see that** — the frame, the strokes and the crop all move
+    # together, so sizes, spans, errors and even a crop's ink content survive it. Only an
+    # absolute check does, which is why it hid through the entire build.
+    from app.pdf_import import PT_MM
+    f = d["frame"]
+    assert f["x0"] == pytest.approx(100 * PT_MM, abs=1.0)
+    assert f["y0"] == pytest.approx((3024 - 1500) * PT_MM, abs=1.0)
+    assert f["y1"] == pytest.approx((3024 - 100) * PT_MM, abs=1.0)
+
+
+@pytest.mark.parametrize("rotation", [0, 270])
+def test_a_crop_covers_its_frame_at_either_rotation(rotation):
+    """THIS IS THE ONE THAT CATCHES THE FLIP. Reverted to `page.rect.height`, rotation 0 still
+    passes and rotation 270 returns 892px where 1960 is right — a plausible-looking image of
+    the wrong part of the page."""
+    from app.pdf_import import read_sheet, render_detail
+    raw = _sheet_pdf(rotation)
+    d = read_sheet(raw, page_index=0)["details"][0]
+    r = render_detail(raw, 0, d["frame"], dpi=100)
+    w_mm, h_mm = r["frame_mm"]["w"], r["frame_mm"]["h"]
+    if r["axes_swapped"]:
+        w_mm, h_mm = h_mm, w_mm
+    assert r["width"] == pytest.approx(w_mm / 25.4 * 100, abs=3)
+    assert r["height"] == pytest.approx(h_mm / 25.4 * 100, abs=3)
+    assert r["rotation"] == rotation and r["axes_swapped"] == (rotation in (90, 270))
+
+    # AND IT MUST CONTAIN THE DRAWING, not merely be the right SIZE. Size survives a
+    # translation, so a crop that lands on blank paper passes a size check — which is exactly
+    # what happened: mutating `extract_geometry`'s flip shifts the frame and the crop TOGETHER
+    # by 304.8mm, the size stays right, and only the content shows the miss.
+    Image = pytest.importorskip("PIL.Image", reason="needs Pillow to inspect the crop")
+    import io
+    im = Image.open(io.BytesIO(r["png"])).convert("L")
+    px = im.load()
+    dark = sum(1 for yy in range(0, im.height, 3) for xx in range(0, im.width, 3)
+               if px[xx, yy] < 200)
+    assert dark > 20, (
+        f"the crop is blank ({dark} dark pixels) — it is the right size and the wrong place")
+
+
+def test_the_listing_and_the_crop_agree_on_which_detail_is_which():
+    """These indexed DIFFERENT lists — the listing from `find_details`, the crop from the frame
+    segmentation — so `detail=0` returned an untitled frame while the listing's first entry was
+    MAIN COLUMN FRONT ELEVATION. A client picking by index would have displayed one drawing and
+    traced another, with nothing to signal it."""
+    from fastapi.testclient import TestClient
+    from app.main import app
+    raw = _sheet_pdf(270)
+    c = TestClient(app)
+    files = {"file": ("t.pdf", raw, "application/pdf")}
+    listed = c.post("/import/pdf/sheet", files=files, data={"page": 0}).json()["details"]
+    got = c.post("/import/pdf/detail", files={"file": ("t.pdf", raw, "application/pdf")},
+                 data={"page": 0, "detail": 0, "dpi": 100}).json()
+    assert got["title"] == listed[0]["title"], "index 0 must be the same detail in both"
+    assert got["scale"] == listed[0]["scale"]
+    import base64
+    assert base64.b64decode(got["png_base64"])[:4] == b"\x89PNG"
