@@ -333,6 +333,78 @@ async def import_pdf_geometry(file: UploadFile = File(...), page: int = Form(0),
         raise HTTPException(422, f"Could not read PDF: {e}")
 
 
+@app.post("/import/pdf/sheet")
+async def import_pdf_sheet(file: UploadFile = File(...), page: int = Form(0),
+                           want_geometry: bool = Form(False)):
+    """Everything one plotted page can tell you, in the shape LEE3D-Lib publishes.
+
+    /import/pdf/geometry returns raw line work; this returns what it MEANS — which sheet it is,
+    what scale each detail is drawn at, which dimensions belong to which detail, and any survey
+    points. The contract is `LEE3D-Lib/schema/sheet.schema.json`, so the studio and the exact
+    build read a drawing the same way rather than each calling the parsers their own way.
+
+    Bulk geometry is omitted unless asked for: a real sheet carries 163,000 strokes, and a
+    client that only wants to know what is on the page should not be sent them.
+    """
+    from .pdf_import import read_sheet, PdfUnavailable
+    raw = await file.read()
+    try:
+        return read_sheet(raw, page_index=page, want_geometry=want_geometry)
+    except PdfUnavailable as e:
+        raise HTTPException(503, str(e))
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except Exception as e:
+        raise HTTPException(422, f"Could not read PDF: {e}")
+
+
+@app.post("/import/pdf/detail")
+async def import_pdf_detail(file: UploadFile = File(...), page: int = Form(0),
+                            detail: int = Form(0), dpi: int = Form(300)):
+    """One framed detail as an image, for a person to trace.
+
+    **The silhouette cannot be extracted automatically.** A construction detail draws the thing
+    IN ITS CONTEXT — measured on L406, the ink covers six times the object's area, because the
+    frame holds the column plus its footing, the finished grade and the compacted subgrade.
+    Which of those is "the object" is a judgement the geometry does not carry. So the trace
+    stays; this makes it cheap by handing over ONE detail at its own known scale instead of a
+    725 x 952mm sheet.
+
+    `detail` indexes the frames `/import/pdf/sheet` reports, so a client picks from what it was
+    already shown. The scale comes back with the image because it belongs to THAT detail and
+    may differ from the sheet's — L406 mixes 1/4" and 3/8" on one page.
+    """
+    from .pdf_import import read_sheet, render_detail, PdfUnavailable
+    import base64
+    raw = await file.read()
+    try:
+        sheet = read_sheet(raw, page_index=page)
+        segs = [d for d in sheet["details"] if d.get("frame")]
+        # A PAGE WITH NO TITLED FRAME IS NOT A DETAILS SHEET. Measured: L201B and L400 each
+        # yield two frames — the 725 x 951.8mm sheet border and a 61mm seal box — which do not
+        # contain one another, so neither is dropped by containment and both survive as
+        # untitled. Handing back a whole site plan as "detail 0" would be worse than a 404.
+        # The titled-frame test is what separates them: real details sheets title nearly all of
+        # theirs (9 of 10 on L406, 10 of 11 on L405, 10 of 13 on L404).
+        if not segs:
+            raise HTTPException(404, "this page has no titled details — it is a plan or a schedule")
+        if detail < 0 or detail >= len(segs):
+            raise HTTPException(404, f"detail {detail} of {len(segs)} on this page")
+        seg = segs[detail]
+        img = render_detail(raw, page, seg["frame"], dpi=dpi)
+        return {"title": seg["title"], "scale": seg["scale"],
+                "png_base64": base64.b64encode(img["png"]).decode("ascii"),
+                **{k: v for k, v in img.items() if k != "png"}}
+    except HTTPException:
+        raise
+    except PdfUnavailable as e:
+        raise HTTPException(503, str(e))
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except Exception as e:
+        raise HTTPException(422, f"Could not read PDF: {e}")
+
+
 # --------------------------------------------------------------------------
 # Library
 # --------------------------------------------------------------------------
