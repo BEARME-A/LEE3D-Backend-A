@@ -94,7 +94,16 @@ def extract_geometry(pdf_bytes: bytes, page_index: int = 0, curve_steps: int = 1
     if page_index < 0 or page_index >= doc.page_count:
         raise ValueError(f"page {page_index} is outside this {doc.page_count}-page document")
     page = doc[page_index]
-    h_pt = page.rect.height                       # to flip y: page paints downward, plans read upward
+    # FLIP y USING THE UNROTATED HEIGHT. `page.rect` is the ROTATED rectangle, but both
+    # `get_drawings()` and `get_text()` report in UNROTATED page space — measured on this set,
+    # where every sheet carries rotation 270: rect is 3024x2160 while the coordinates run to
+    # 2106x2999, which is the mediabox. Using rect.height flipped against 2160 instead of 3024
+    # and put every y out by 864pt — 304.8mm — with many going negative.
+    #
+    # Nothing RELATIVE noticed: lengths, spans, proximity and framing are all invariant to a
+    # uniform shift, which is why dimensions linked at 0.00% error throughout. It surfaced only
+    # when a crop had to be handed back to PDF space, where absolute position matters.
+    h_pt = page.rect.height if page.rotation in (0, 180) else page.rect.width
     mm = lambda x, y: (x * PT_MM, (h_pt - y) * PT_MM)
 
     strokes: List[List] = []
@@ -233,10 +242,16 @@ def parse_feet_inches(text: str) -> Optional[float]:
     return round((ft * 12.0 + inches) * MM_PER_IN, 6)
 
 
+# The ratios a drawing is actually plotted at. Architectural: 3"=1'-0" down to 1/32"=1'-0".
+# Engineering: 1"=10' through 1"=100'. Plus the metric ratios that appear on the same sheets.
+_STANDARD_SCALES = (1, 2, 4, 8, 12, 16, 24, 32, 48, 64, 96, 128, 192, 384,
+                    120, 240, 360, 480, 600, 720, 1200,
+                    5, 10, 20, 25, 50, 100, 200, 250, 500, 1000, 2000, 2500, 5000)
+
 _ARCH_SCALE_RE = re.compile(r"^(?P<lhs>[^=]+?)\s*=\s*(?P<rhs>.+)$")
 
 
-def parse_arch_scale(text: str) -> Optional[float]:
+def parse_arch_scale(text: str, standard_only: bool = True) -> Optional[float]:
     """An architectural scale as printed — 1/4" = 1'-0" — as a plain ratio denominator.
 
     1/4" = 1'-0"  ->  48       one paper inch stands for four real feet
@@ -261,7 +276,18 @@ def parse_arch_scale(text: str) -> Optional[float]:
     if not paper or not real or paper <= 0 or real <= 0:
         return None
     ratio = real / paper
-    return ratio if 1.0 <= ratio <= 20000.0 else None
+    if not (1.0 <= ratio <= 20000.0):
+        return None
+    ratio = round(ratio, 6)
+    if not standard_only:
+        return ratio
+    # ONLY A SCALE SOMEONE ACTUALLY DRAWS AT. Found on the real L406: a detail bubble number
+    # sitting just before its scale text gets swallowed by the span search, so `1/4" = 1'-0"`
+    # preceded by the bubble "1" reads as `1 1/4" = 1'-0"` — a valid-LOOKING 1:9.6. The bubbles
+    # 2 and 3 gave 1:5.33 and 1:3.69 the same way. Every one of those is a scale no drafter
+    # uses, and requiring a standard ratio rejects all three while keeping every real one.
+    best = min(_STANDARD_SCALES, key=lambda c: abs(c - ratio))
+    return float(best) if abs(best - ratio) <= max(0.01, best * 0.002) else None
 
 
 _SCALE_RE = re.compile(r"^1\s*[:/]\s*(\d{1,6})$")
@@ -596,6 +622,16 @@ def read_sheet(data: bytes, page_index: int = 0, want_geometry: bool = False) ->
     """
     g = extract_geometry(data, page_index=page_index)
     words, strokes = g.get("words", []), g.get("strokes", [])
+    details = find_details(words)
+    # ONE LIST, ONE INDEX. `details` is what a client is shown and what it picks from, so each
+    # entry carries the FRAME its geometry lives in. Reporting titles from one list and cropping
+    # from another let `detail=0` return an untitled frame while the listing's first entry was
+    # MAIN COLUMN FRONT ELEVATION — a client picking by index would silently get a different
+    # drawing from the one it displayed.
+    _segs = segment_by_frame(strokes, details)
+    _by_title = {x["title"]: x["frame"] for x in _segs if x["title"]}
+    for _d in details:
+        _d["frame"] = _by_title.get(_d["title"])
     printed = g.get("plot_scale")
     inferred = None if printed else infer_plot_scale(strokes, words)
     used = printed or inferred
@@ -606,9 +642,361 @@ def read_sheet(data: bytes, page_index: int = 0, want_geometry: bool = False) ->
         "sheet": sheet_identity(words),
         "scale": {"printed": printed, "inferred": inferred, "used": used},
         "counts": {"strokes": len(strokes), "words": len(words)},
-        "dimensions": link_dimensions(strokes, words, used) if used else [],
+        "details": details,
+        # PER DETAIL, NOT PER SHEET. A sheet that mixes scales makes a single sheet scale wrong
+        # for part of itself — the real L406 measures its wayfinding sign at 3/8" among column
+        # sections at 1/4". Linking at the sheet scale loses those dimensions entirely.
+        "dimensions": link_dimensions_by_detail(strokes, words, details, used),
         "points": parse_point_schedule(words),
     }
     if want_geometry:
         out["strokes"], out["words"] = strokes, words
     return out
+
+
+# ----------------------------------------------------------------------------------------
+# SURVEY POINTS -> SOMETHING THE APP CAN PLACE.
+#
+# A schedule gives absolute state-plane coordinates in feet — 2068137.9965 N, 414321.8101 E.
+# Nothing can be built from those directly: they are seven digits of offset from a datum
+# hundreds of miles away. What a model needs is LOCAL millimetres from a chosen origin, at the
+# ratio the model is being built to.
+#
+# **PLOT SCALE IS NOT MODEL SCALE, and conflating them is the mistake this signature exists to
+# prevent.** A sheet plotted at 1"=20'-0" (1:240) is a statement about PAPER. The model may be
+# built at 1:100 or 1:200 for reasons that have nothing to do with how the drawing was printed.
+# So the ratio is passed in; it is never taken from the sheet.
+# ----------------------------------------------------------------------------------------
+MM_PER_FT = 304.8          # international foot, exact
+
+
+def survey_layout(points, model_scale: float, origin_id=None) -> Dict:
+    """Survey points as local model millimetres, plus what they span.
+
+    `model_scale` is the build ratio — 200 for a 1:200 model — NOT the sheet's plot scale.
+    `origin_id` picks which point sits at (0, 0); the first point is used when it is absent or
+    not found, and the choice is reported so a caller is never guessing which one it was.
+
+    x runs EAST and y runs NORTH, which is the convention of the schedule itself rather than
+    any screen axis — mapping to a viewport is the caller's business and depends on which way
+    the model is laid down.
+
+    The international foot (304.8mm exactly) is used. A state-plane schedule may be in US
+    survey feet, which differ by 2 parts per million: across this monument's 50ft span that is
+    0.03mm of real building, and at any model ratio it is far below what prints.
+    """
+    pts = [p for p in (points or []) if p.get("northing") is not None
+           and p.get("easting") is not None]
+    if not pts:
+        return {"origin": None, "model_scale": model_scale, "points": [], "extent_mm": None}
+    origin = next((p for p in pts if p.get("id") == origin_id), None) if origin_id is not None else None
+    if origin is None:
+        origin = pts[0]
+    scale = float(model_scale) if model_scale else 1.0
+    if scale <= 0:
+        scale = 1.0
+    out = []
+    for p in pts:
+        east_ft = p["easting"] - origin["easting"]
+        north_ft = p["northing"] - origin["northing"]
+        out.append({"id": p.get("id"), "description": p.get("description", ""),
+                    "x_mm": round(east_ft * MM_PER_FT / scale, 4),
+                    "y_mm": round(north_ft * MM_PER_FT / scale, 4),
+                    "east_ft": round(east_ft, 4), "north_ft": round(north_ft, 4)})
+    xs = [q["x_mm"] for q in out]
+    ys = [q["y_mm"] for q in out]
+    return {"origin": {"id": origin.get("id"), "description": origin.get("description", "")},
+            "model_scale": scale,
+            "points": out,
+            "extent_mm": {"x": round(max(xs) - min(xs), 4), "y": round(max(ys) - min(ys), 4)}}
+
+
+def survey_span(points, a_id, b_id) -> Optional[Dict]:
+    """Distance and bearing between two survey points, in real units.
+
+    Bearing is degrees clockwise from NORTH, which is how a drawing states it — not the
+    mathematical convention of counter-clockwise from east. Getting that backwards puts a
+    monument across the road from where it belongs.
+    """
+    idx = {p.get("id"): p for p in (points or []) if p.get("id") is not None}
+    a, b = idx.get(a_id), idx.get(b_id)
+    if not a or not b:
+        return None
+    de = b["easting"] - a["easting"]
+    dn = b["northing"] - a["northing"]
+    dist_ft = (de * de + dn * dn) ** 0.5
+    import math as _m
+    bearing = _m.degrees(_m.atan2(de, dn)) % 360.0
+    return {"from": a_id, "to": b_id, "distance_ft": round(dist_ft, 4),
+            "distance_mm": round(dist_ft * MM_PER_FT, 2),
+            "bearing_deg_from_north": round(bearing, 4)}
+
+
+# ----------------------------------------------------------------------------------------
+# WHAT IS ON THIS SHEET? A details sheet is not one drawing — L406 carries eight, each with a
+# bubble number, a title and ITS OWN SCALE. Treating such a sheet as having one scale is wrong
+# on its face, and it is why L406 legitimately reports none: it mixes a 3/8" sign detail in
+# among the 1/4" column sections.
+#
+# A detail announces itself the same way on every sheet in this trade: a title, and its scale
+# printed directly beneath it. So the scale text is the anchor and the title is read back from
+# it. Measured on the real L406, the title words share one band position (x 32.6) while the
+# scale sits one line over (x 24.2) and is markedly smaller — 2-6mm of text height against
+# 15-34mm. The band is what separates them; the size difference is a corroboration, not the
+# test, because a title block can print small titles.
+# ----------------------------------------------------------------------------------------
+def find_details(words) -> List[Dict]:
+    """Every titled detail on a sheet: number, title, scale and where it sits.
+
+    Returns them in sheet order. A sheet with no titled details — a plan, a schedule — yields
+    an empty list, which is the honest answer rather than one detail covering the page.
+    """
+    ws = list(words or [])
+    out: List[Dict] = []
+    for i, w in enumerate(ws):
+        span_hit = None
+        for span in (1, 2, 3, 4):
+            txt = " ".join(x.get("text", "") for x in ws[i:i + span])
+            sc = parse_arch_scale(txt)
+            if sc:
+                span_hit = (span, sc, txt)
+                break
+        if not span_hit:
+            continue
+        span, scale, scale_text = span_hit
+        # which axis does a line of text run along? the scale's own runs share one of them.
+        group = ws[i:i + span]
+        if span > 1:
+            dx = max(q.get("x", 0.0) for q in group) - min(q.get("x", 0.0) for q in group)
+            dy = max(q.get("y", 0.0) for q in group) - min(q.get("y", 0.0) for q in group)
+            axis = "x" if dx <= dy else "y"
+        else:
+            axis = "x"
+        pos = (lambda q: q.get("x", 0.0)) if axis == "x" else (lambda q: q.get("y", 0.0))
+        # the title is the contiguous run before the scale sharing ONE band position of its own
+        title_words: List[str] = []
+        title_pos = None
+        for k in range(i - 1, max(-1, i - 14), -1):
+            q = ws[k]
+            if title_pos is None:
+                title_pos = pos(q)
+            elif abs(pos(q) - title_pos) > 2.0:
+                break
+            title_words.append(q.get("text", ""))
+        title_words.reverse()
+        number = None
+        if title_words and re.match(r"^\d{1,2}$", title_words[0].strip()):
+            number = int(title_words[0]); title_words = title_words[1:]
+        title = " ".join(t for t in title_words if t).strip()
+        # NOT EVERY SCALE TEXT BELONGS TO A DETAIL. A plan sheet prints its scale under a
+        # SCALE BAR and a north arrow, and reading back from those gave L201B two phantom
+        # details titled "N" and "SCALE:". A label ends in a colon and a north arrow is one
+        # letter; a real title is neither. This keeps single-word details like "LOGO", which
+        # is detail 10 on L404 and would be lost to a two-word rule.
+        if not title or len(title) < 2 or title.endswith(":"):
+            continue
+        # A TITLE IS NOT A SCALE. "SCALE:" is itself an anchor — the parser strips that prefix
+        # — and its walk-back happily collected the NEIGHBOURING detail's scale text as a
+        # title, yielding a phantom detail called `1" = 20'-0"`. Nothing about position
+        # prevents that; only asking what the words mean does.
+        if parse_arch_scale(title) or parse_feet_inches(title):
+            continue
+        out.append({"number": number, "title": title, "scale": scale,
+                    "scale_text": scale_text, "x": w.get("x", 0.0), "y": w.get("y", 0.0)})
+    return out
+
+
+def link_dimensions_by_detail(strokes, words, details, fallback_scale=None,
+                              tol: float = 0.02, search_mm: float = 25.0) -> List[Dict]:
+    """Link every dimension at the scale of the detail it belongs to, not the sheet's.
+
+    **A sheet scale is wrong for a sheet that mixes scales, and the real L406 does.** Eight
+    column sections at 1/4"=1'-0" and a wayfinding sign at 3/8" — measuring the sign's
+    dimensions at 1:48 understates them by a third, and the arithmetic check then rejects them,
+    so they vanish rather than arrive wrong. Either way the sign is unbuildable from the sheet
+    it is drawn on.
+
+    Each dimension is assigned to the nearest titled detail and measured at that detail's
+    scale. The detail is reported on every match, which is the segmentation a caller actually
+    wants: not "here are 87 dimensions on L406" but "here are the eleven belonging to
+    MAIN COLUMN FRONT ELEVATION".
+
+    With no titled details — a plan sheet — this falls back to `fallback_scale` and behaves
+    exactly as `link_dimensions` does.
+    """
+    if not details:
+        got = link_dimensions(strokes, words, fallback_scale, tol, search_mm) if fallback_scale else []
+        for d in got:
+            d["detail"] = None
+        return got
+    buckets: Dict[int, List[Dict]] = {}
+    for w in words or []:
+        if not parse_feet_inches(w.get("text", "")):
+            continue
+        wx, wy = w.get("x", 0.0), w.get("y", 0.0)
+        best_i, best_d = None, None
+        for i, det in enumerate(details):
+            dd = ((wx - det["x"]) ** 2 + (wy - det["y"]) ** 2) ** 0.5
+            if best_d is None or dd < best_d:
+                best_i, best_d = i, dd
+        buckets.setdefault(best_i, []).append(w)
+    out: List[Dict] = []
+    for i, ws in buckets.items():
+        det = details[i]
+        for m in link_dimensions(strokes, ws, det["scale"], tol, search_mm):
+            m["detail"] = {"title": det["title"], "scale": det["scale"]}
+            out.append(m)
+    return out
+
+
+# ----------------------------------------------------------------------------------------
+# WHICH STROKES BELONG TO WHICH DETAIL. A sheet holds 163,293 of them and nine details; a
+# builder needs the few thousand that are one column, not the lot.
+#
+# **THE SHEET DRAWS THE ANSWER.** A details sheet frames each detail, and on the real L406
+# those frames are an exact grid: 181.0 x 368.3mm cells at x 19.4, 200.4, 381.3, 562.3. Using
+# them is exact where the alternatives are not — two were tried and measured first:
+#
+#   nearest-anchor Voronoi on the matched STROKES  9 regions, 5 of 36 pairs overlapping,
+#                                                  two degenerate to a point, one spanning
+#                                                  half the sheet (a long leader line)
+#   nearest-anchor on the dimension TEXT           9 regions, 3 of 36 overlapping, one
+#                                                  claiming 87 dimensions over 260x571mm
+#
+# Both fail the same way: a detail's anchor is its SCALE TEXT, printed at the BOTTOM, so a
+# dimension at the top of one detail is often nearer the anchor of the detail below it. A
+# frame has no such ambiguity. **A segmentation that is roughly right is worse than none —
+# handing a builder two details' geometry mixed together produces a wrong model in silence.**
+# ----------------------------------------------------------------------------------------
+def detail_frames(strokes, min_mm: float = 60.0) -> List[Dict]:
+    """Axis-aligned rectangles a details sheet uses to box each detail, outer border removed.
+
+    The border is dropped by containment rather than by size: it is the rectangle that holds
+    the others. Sorting by area and dropping the largest would also drop a legitimately large
+    detail on a sheet that has no border at all.
+    """
+    rects = []
+    for i, s in enumerate(strokes or []):
+        if not (4 <= len(s) <= 6):
+            continue
+        xs = [p[0] for p in s]
+        ys = [p[1] for p in s]
+        x0, x1, y0, y1 = min(xs), max(xs), min(ys), max(ys)
+        if (x1 - x0) < min_mm or (y1 - y0) < min_mm:
+            continue
+        if not all(abs(s[k][0] - s[k + 1][0]) < 0.6 or abs(s[k][1] - s[k + 1][1]) < 0.6
+                   for k in range(len(s) - 1)):
+            continue
+        rects.append({"stroke": i, "x0": x0, "y0": y0, "x1": x1, "y1": y1,
+                      "w": x1 - x0, "h": y1 - y0})
+    # de-duplicate: a frame may be drawn twice, or as a path and its own outline
+    uniq: List[Dict] = []
+    for r in rects:
+        if not any(abs(r["x0"] - q["x0"]) < 1.0 and abs(r["y0"] - q["y0"]) < 1.0
+                   and abs(r["w"] - q["w"]) < 1.0 and abs(r["h"] - q["h"]) < 1.0 for q in uniq):
+            uniq.append(r)
+    def contains(a, b):
+        return (a["x0"] <= b["x0"] + 1.0 and a["y0"] <= b["y0"] + 1.0
+                and a["x1"] >= b["x1"] - 1.0 and a["y1"] >= b["y1"] - 1.0 and a is not b)
+    return [r for r in uniq if not any(contains(r, q) for q in uniq)]
+
+
+def _in_frame(x, y, f, pad: float = 0.0) -> bool:
+    return (f["x0"] - pad) <= x <= (f["x1"] + pad) and (f["y0"] - pad) <= y <= (f["y1"] + pad)
+
+
+def segment_by_frame(strokes, details, frames=None) -> List[Dict]:
+    """Each framed detail with the strokes drawn inside its frame.
+
+    A detail is placed by its anchor; a stroke by its midpoint, so a dimension line reaching
+    slightly past a frame edge still lands with the drawing it measures. Frames holding no
+    titled detail are returned with `title: None` rather than dropped — on a real sheet that is
+    a detail whose title did not parse, and silently discarding its geometry would hide it.
+    """
+    frames = detail_frames(strokes) if frames is None else frames
+    # ONE DETAIL PER FRAME, ONE FRAME PER DETAIL. Walking frames and taking the first detail
+    # that fits let a single detail claim TWO frames — measured on L406, where
+    # MAIN COLUMN CROSS-SECTION 5 was assigned twice while WAYFINDING SIGN got nothing. A
+    # scale text sits at the bottom edge of its own frame, so with any padding at all an anchor
+    # falls inside its neighbour too. Assigning detail -> frame, smallest containing frame
+    # first, makes the relationship one-to-one by construction.
+    # NO PADDING. Frames abut exactly — L406's grid is 181.0mm cells with no gutter — so any
+    # padding at all puts an anchor inside its neighbour as well. Measured on that sheet:
+    #     pad  0mm  -> 9 of 9 details inside exactly one frame
+    #     pad  4mm  -> 9 of 9
+    #     pad 12mm  -> 3 of 9, with SIX inside several
+    # The padding was the whole fault: it caused both the duplicate claims and the two details
+    # that ended up with no frame at all. A scale text is printed INSIDE its own frame, so
+    # nothing needed to be allowed for.
+    claimed: Dict[int, Dict] = {}
+    for d in details or []:
+        fits = [(fi, f) for fi, f in enumerate(frames)
+                if _in_frame(d.get("x", 0.0), d.get("y", 0.0), f, pad=0.0)]
+        if not fits:
+            continue
+        fi, _ = min(fits, key=lambda p: p[1]["w"] * p[1]["h"])
+        if fi not in claimed:
+            claimed[fi] = d
+    out = []
+    for fi, f in enumerate(frames):
+        d = claimed.get(fi)
+        title = d["title"] if d else None
+        scale = d["scale"] if d else None
+        idx = []
+        for i, s in enumerate(strokes or []):
+            if not s:
+                continue
+            mx = sum(p[0] for p in s) / len(s)
+            my = sum(p[1] for p in s) / len(s)
+            if _in_frame(mx, my, f):
+                idx.append(i)
+        out.append({"title": title, "scale": scale, "frame": f, "strokes": idx})
+    return out
+
+
+def render_detail(pdf_bytes: bytes, page_index: int, frame: Dict, dpi: int = 300,
+                  margin_mm: float = 2.0) -> Dict:
+    """One framed detail, rasterised on its own, for a person to trace.
+
+    The silhouette of a detail cannot be extracted automatically — measured on L406, the drawn
+    ink covers six times the object's area, because a construction detail draws the thing IN
+    ITS CONTEXT: the column plus its footing, the finished grade, the compacted subgrade. Which
+    of those is "the object" is a judgement the geometry does not carry. **So the trace stays,
+    and this is what makes it cheap:** one detail at a time instead of a 725 x 952mm sheet, with
+    its scale and dimensions already read off the drawing.
+
+    `frame` is a rectangle in the SAME millimetres `extract_geometry` reports, which measures y
+    upward from the page bottom while PDF user space measures it downward — so the crop inverts
+    it. Getting that wrong renders a different detail entirely, mirrored about the page middle,
+    and it looks perfectly plausible.
+    """
+    fitz = _fitz()
+    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+    page = doc[page_index]
+    to_pt = 1.0 / PT_MM
+    # THREE SPACES, AND ALL THREE MATTER. Our millimetres measure y UPWARD in the UNROTATED
+    # page; PDF points measure it downward in the same unrotated page; and `get_pixmap(clip=)`
+    # wants the ROTATED display rectangle. Every sheet in this set carries rotation 270, so
+    # skipping the last step silently clipped crops against the wrong page edge — one detail
+    # came back 1682px tall where 4397 was right, and it looked like a plausible image.
+    h_pt = page.rect.height if page.rotation in (0, 180) else page.rect.width
+    x0 = (frame["x0"] - margin_mm) * to_pt
+    x1 = (frame["x1"] + margin_mm) * to_pt
+    y0 = h_pt - (frame["y1"] + margin_mm) * to_pt
+    y1 = h_pt - (frame["y0"] - margin_mm) * to_pt
+    clip = (fitz.Rect(x0, y0, x1, y1) * page.rotation_matrix) & page.rect
+    zoom = dpi / 72.0
+    pix = page.get_pixmap(matrix=fitz.Matrix(zoom, zoom), clip=clip, alpha=False)
+    # THE IMAGE COMES BACK THE RIGHT WAY UP, which on a rotated page means its axes are SWAPPED
+    # relative to the frame: a 181 x 368mm frame on a 270-degree sheet renders 4398 x 2186px,
+    # not 2186 x 4398. That is what a person should see, so it is what is returned — but a
+    # caller mapping a traced point back to millimetres has to know, so the rotation and the
+    # frame's own size are reported beside the image rather than left to be inferred.
+    return {"png": pix.tobytes("png"), "width": pix.width, "height": pix.height,
+            "dpi": dpi,
+            "mm_per_px": 25.4 / dpi,
+            "rotation": page.rotation,
+            "axes_swapped": page.rotation in (90, 270),
+            "frame_mm": {"w": frame["x1"] - frame["x0"] + 2 * margin_mm,
+                         "h": frame["y1"] - frame["y0"] + 2 * margin_mm},
+            "origin_mm": {"x": frame["x0"] - margin_mm, "y": frame["y0"] - margin_mm}}
