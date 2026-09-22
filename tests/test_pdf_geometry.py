@@ -608,12 +608,22 @@ def test_a_plan_sheet_is_not_offered_as_a_detail_to_trace():
 
     The refusal is STRUCTURAL rather than a special case: the listing carries only TITLED
     details, so a plan sheet produces an empty list and there is nothing to index. That is the
-    better shape — a guard that has to recognise a plan sheet is a guard that can fail to."""
-    import inspect
-    from app.main import import_pdf_detail
-    src = inspect.getsource(import_pdf_detail)
-    assert 'sheet["details"]' in src and "if not segs:" in src, (
-        "an empty listing must refuse by itself, without a special case for plan sheets")
+    better shape — a guard that has to recognise a plan sheet is a guard that can fail to.
+
+    THIS USED TO BE A SOURCE-STRING ASSERTION (`'if not segs:' in src`), which this file's own
+    rules say not to write: it survives any rewrite that keeps the string and breaks the
+    behaviour, and it went red on a rename that fixed a real bug. Now it drives the endpoint."""
+    from fastapi.testclient import TestClient
+    from app.main import app
+    raw = _plan_only_pdf()
+    c = TestClient(app)
+    listed = c.post("/import/pdf/sheet", files={"file": ("p.pdf", raw, "application/pdf")},
+                    data={"page": 0}).json()
+    assert listed["details"] == [], "a plan sheet has no titled details to offer"
+    r = c.post("/import/pdf/detail", files={"file": ("p.pdf", raw, "application/pdf")},
+               data={"page": 0, "detail": 0, "dpi": 72})
+    assert r.status_code == 404, "a whole site plan handed back as 'detail 0' is worse than a 404"
+    assert "plan or a schedule" in r.json()["detail"]
 
 
 
@@ -720,3 +730,128 @@ def test_the_listing_and_the_crop_agree_on_which_detail_is_which():
     assert got["scale"] == listed[0]["scale"]
     import base64
     assert base64.b64decode(got["png_base64"])[:4] == b"\x89PNG"
+
+
+def _plan_only_pdf() -> bytes:
+    """A sheet with line work and a scale bar but no titled detail — a site plan.
+
+    A plan prints its scale under a SCALE BAR and a north arrow, which is what gave L201B two
+    phantom details called "N" and "SCALE:" before the title rules were tightened. So the
+    fixture carries both, and a plan that yields an empty listing is the property under test.
+    """
+    doc = fitz.open()
+    page = doc.new_page(width=2160, height=3024)
+    page.draw_rect(fitz.Rect(60, 60, 2100, 2960), color=(0, 0, 0), width=1)   # sheet border
+    page.insert_text((200, 1500), "N", fontsize=12)
+    page.insert_text((400, 1500), "SCALE:", fontsize=9)
+    page.insert_text((470, 1500), '1" = 20\'-0"', fontsize=9)
+    page.draw_line(fitz.Point(300, 800), fitz.Point(900, 800), color=(0, 0, 0), width=1)
+    return doc.tobytes()
+
+
+def _mixed_sheet_pdf(rotation: int = 0) -> bytes:
+    """Two titled details, and ONLY THE SECOND IS BOXED.
+
+    This is the fixture the index test was missing. `read_sheet` lists every titled detail and
+    attaches a frame to the ones it can place, so a sheet where one detail is drawn without a
+    border — or whose frame did not parse — leaves a listed entry with `frame: None`. The crop
+    used to index a FILTERED copy of that list, so everything after the unframed entry shifted
+    by one. A fixture where every detail is framed cannot see that, which is why the bug came
+    back: the old fixture reproduced the shape of the sheet, not the geometry that caused it.
+
+    The unframed one is drawn FIRST so it takes index 0 and shifts the other.
+    """
+    doc = fitz.open()
+    page = doc.new_page(width=2160, height=3024)
+    # 1. unboxed — no rectangle around it
+    page.insert_text((120, 400), "WAYFINDING SIGN", fontsize=14)
+    page.insert_text((120, 430), '3/8" = 1\'-0"', fontsize=9)
+    # 2. boxed, the way a details sheet draws one
+    page.draw_rect(fitz.Rect(100, 900, 700, 2300), color=(0, 0, 0), width=1)
+    page.insert_text((120, 2200), "MAIN COLUMN FRONT ELEVATION", fontsize=14)
+    page.insert_text((120, 2230), '1/4" = 1\'-0"', fontsize=9)
+    L = 1219.2 / 48.0 / PT_MM
+    page.draw_line(fitz.Point(200, 1200), fitz.Point(200 + L, 1200), color=(0, 0, 0), width=1)
+    page.insert_text((200 + L / 2 - 10, 1192), "4'-0\"", fontsize=8)
+    if rotation:
+        page.set_rotation(rotation)
+    return doc.tobytes()
+
+
+@pytest.mark.parametrize("rotation", [0, 270])
+def test_an_unframed_detail_does_not_shift_every_index_after_it(rotation):
+    """THE SAME FAULT AS BEFORE, WEARING THE FIX FOR IT.
+
+    `/import/pdf/sheet` publishes every titled detail; `/import/pdf/detail` used to index
+    `[d for d in sheet["details"] if d.get("frame")]`. One unplaceable detail and the two lists
+    part company. Measured on this fixture at both rotations before the fix:
+
+        listing index 0 = WAYFINDING SIGN            crop returned MAIN COLUMN FRONT ELEVATION
+        listing index 1 = MAIN COLUMN FRONT ELEVATION  ->  404 "detail 1 of 1"
+
+    Both halves are pinned here, because they fail in opposite directions: the first hands back
+    the wrong drawing with a title and scale that agree with it, and the second refuses the one
+    detail on the page that can actually be cropped.
+    """
+    from fastapi.testclient import TestClient
+    from app.main import app
+    raw = _mixed_sheet_pdf(rotation)
+    c = TestClient(app)
+
+    def files():
+        return {"file": ("m.pdf", raw, "application/pdf")}
+
+    listed = c.post("/import/pdf/sheet", files=files(), data={"page": 0}).json()["details"]
+    titles = [d["title"] for d in listed]
+    assert titles == ["WAYFINDING SIGN", "MAIN COLUMN FRONT ELEVATION"], titles
+    assert not listed[0]["frame"] and listed[1]["frame"], "the fixture must reproduce the cause"
+
+    # the framed one is at index 1 in the listing, so index 1 has to crop it
+    ok = c.post("/import/pdf/detail", files=files(), data={"page": 0, "detail": 1, "dpi": 72})
+    assert ok.status_code == 200, ok.text
+    assert ok.json()["title"] == "MAIN COLUMN FRONT ELEVATION"
+    assert ok.json()["scale"] == pytest.approx(48.0)
+
+    # and index 0 must refuse rather than hand back its neighbour's picture
+    bad = c.post("/import/pdf/detail", files=files(), data={"page": 0, "detail": 0, "dpi": 72})
+    assert bad.status_code == 404, (
+        "an unboxed detail has no frame to crop — returning the next one is the bug")
+    assert "not boxed" in bad.json()["detail"]
+    assert "WAYFINDING SIGN" in bad.json()["detail"], "say WHICH detail could not be cropped"
+
+
+@pytest.mark.parametrize("rotation", [0, 270])
+def test_a_crop_reports_the_paper_it_actually_covers(rotation):
+    """`frame_mm` is what the other end DIVIDES A TRACED SPAN BY, so it has to describe the
+    image rather than the request.
+
+    `get_pixmap(clip=)` intersects the clip with the page, and a frame drawn at the sheet edge
+    runs off it as soon as the 2mm margin is added. Reporting the requested rectangle then
+    overstates the paper and `drawnSpanToReal` returns a building that is plausible and quietly
+    small — the same silent-size failure as the axes swap and the 304.8mm offset.
+
+    Measured on a frame at x0 = 0 before the fix: the image came back 842px where the reported
+    215.67mm wanted 849px. Small here because the margin is 2mm of 215; it is bounded only by
+    how far the frame runs off the sheet.
+    """
+    from app.pdf_import import read_sheet, render_detail
+    doc = fitz.open()
+    page = doc.new_page(width=2160, height=3024)
+    page.draw_rect(fitz.Rect(0, 100, 600, 1500), color=(0, 0, 0), width=1)   # ON the page edge
+    page.insert_text((20, 1400), "EDGE DETAIL ELEVATION", fontsize=14)
+    page.insert_text((20, 1430), '1/4" = 1\'-0"', fontsize=9)
+    if rotation:
+        page.set_rotation(rotation)
+    raw = doc.tobytes()
+
+    d = read_sheet(raw, page_index=0)["details"][0]
+    assert d["frame"] and d["frame"]["x0"] == pytest.approx(0.0, abs=0.5), (
+        "the fixture must put the frame ON the edge, or the clip is never truncated")
+    r = render_detail(raw, 0, d["frame"], dpi=100)
+    w_mm, h_mm = r["frame_mm"]["w"], r["frame_mm"]["h"]
+    if r["axes_swapped"]:
+        w_mm, h_mm = h_mm, w_mm
+    assert r["width"] == pytest.approx(w_mm / 25.4 * 100, abs=1.5)
+    assert r["height"] == pytest.approx(h_mm / 25.4 * 100, abs=1.5)
+    # and the origin has to stay on the page, not one margin off the left of it
+    assert r["origin_mm"]["x"] >= -1e-6, "a crop cannot start at negative paper"
