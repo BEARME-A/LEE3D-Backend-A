@@ -987,6 +987,18 @@ def render_detail(pdf_bytes: bytes, page_index: int, frame: Dict, dpi: int = 300
     clip = (fitz.Rect(x0, y0, x1, y1) * page.rotation_matrix) & page.rect
     zoom = dpi / 72.0
     pix = page.get_pixmap(matrix=fitz.Matrix(zoom, zoom), clip=clip, alpha=False)
+    # REPORT THE PAPER THE IMAGE ACTUALLY COVERS, NOT THE PAPER THAT WAS ASKED FOR.
+    # `& page.rect` truncates a clip that runs off the sheet, which a frame drawn at the page
+    # edge does as soon as the margin is added. The image then spans LESS paper than `frame_mm`
+    # claims, and `drawnSpanToReal` at the other end divides a traced span by that figure — so
+    # the building comes out a plausible size and quietly the wrong one, which is this file's
+    # whole failure mode. Measured on a frame at x0 = 0: the crop came back 842px where the
+    # reported 215.67mm wanted 849px, a silent 0.83% on that edge, unbounded in principle.
+    # Deriving both from the clip makes the two agree by construction rather than by luck, and
+    # leaves every frame that fits on the page exactly as it was.
+    kept = clip * ~page.rotation_matrix           # back out of display space into PDF points
+    fx0, fx1 = kept.x0 * PT_MM, kept.x1 * PT_MM
+    fy0, fy1 = (h_pt - kept.y1) * PT_MM, (h_pt - kept.y0) * PT_MM
     # THE IMAGE COMES BACK THE RIGHT WAY UP, which on a rotated page means its axes are SWAPPED
     # relative to the frame: a 181 x 368mm frame on a 270-degree sheet renders 4398 x 2186px,
     # not 2186 x 4398. That is what a person should see, so it is what is returned — but a
@@ -997,6 +1009,5 @@ def render_detail(pdf_bytes: bytes, page_index: int, frame: Dict, dpi: int = 300
             "mm_per_px": 25.4 / dpi,
             "rotation": page.rotation,
             "axes_swapped": page.rotation in (90, 270),
-            "frame_mm": {"w": frame["x1"] - frame["x0"] + 2 * margin_mm,
-                         "h": frame["y1"] - frame["y0"] + 2 * margin_mm},
-            "origin_mm": {"x": frame["x0"] - margin_mm, "y": frame["y0"] - margin_mm}}
+            "frame_mm": {"w": fx1 - fx0, "h": fy1 - fy0},
+            "origin_mm": {"x": fx0, "y": fy0}}
