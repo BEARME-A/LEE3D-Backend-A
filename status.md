@@ -1771,6 +1771,58 @@ including the plank work, which is fine, but a field-vs-stamp comparison that do
    and neither number is currently the thing that gets printed.
 
 ======================================================================
+## THE OPEN DECISION IS CLOSED — a trace is measured against the PAGE. 2026-09-21.
+======================================================================
+_`profileScaleFromTrace()` was written, tested, and called by nothing. HANDOFF §6 put the
+choice of basis to Collin; picked up as WIP and taken the larger way._
+
+### THE TRAP, restated because it is the whole of it
+`drawing.crop.frame_mm` describes the WHOLE page image. A view's traced points are in the BOX
+canvas that `cropCanvas` cut out of that page and scaled by `cf`. So `view.drawing = pg.drawing`
+is one line that compiles, runs, and measures the trace as a fraction of the BOX before
+multiplying by the PAGE's paper size. A building covering a third of the page comes back three
+times too small. Every step of the arithmetic is right.
+
+### FIX 1 WAS TAKEN: one basis, page-image pixels, throughout
+The two options were converting the points to page coordinates, or scaling `frame_mm` down by
+the box's share of the page. The second is smaller and **leaves two bases alive in the file**,
+and this document already carries a section on two notions of one thing quietly disagreeing
+being the root of three separate bugs. So the points move.
+
+    boxPtsToPage(pts, src)      undoes `cf`, adds the box offset -> page-image pixels
+    viewRealSize(view, scale)   the ONLY way to ask. Everything that decides the basis is here.
+
+`view.drawingSrc = {x0, y0, cf, pageW, pageH}` is written at the same statement as
+`view.drawing`, never apart from it.
+
+### MEASURED, on the fixture that makes the error impossible to miss
+The same trace, once against the page and once against a box a third of its width, on 1000mm of
+paper at 1:100:
+
+    against the PAGE    33.33 m      correct
+    against the BOX    100.00 m      3x, and nothing downstream could question it
+
+### THE CALL SITE: REPORTED, NOT APPLIED
+`viewRealSize` now runs when views are sent to the tracer, and the toast says what the drawing
+makes the thing — `side measures about 33.33 m x 12.50 m at the drawing's 1:100`. It does not
+set `realLength`. Silently resizing somebody's model off an auto-trace is the wrong way round,
+and this file's habit is to report a reading and leave the resolution to the person:
+`scale_mismatch`, `unusable_views`, `hollow_failed`. **Wiring it into "Build it at a scale"
+is the next step and wants Collin's eyes on the number first.**
+
+### THREE MUTANTS, and a fourth thing that caught me
+    cf not undone in boxPtsToPage        -> the conversion test fails
+    viewRealSize passes view.A straight  -> the guard and the null-cases test fail
+    the record shipped without its basis -> the source guard fails, naming the bug
+
+**And the source guard failed on its own comment first.** `indexOf("view.drawing = pg.drawing")`
+matched the COMMENT above the assignment — the one that quotes the wrong version of the line in
+order to explain why it is wrong. That is the third time in this file that prose describing code
+has fooled a check of that code, and the second time from the hand that had just written the
+warning about it. The check now scans every occurrence and asks whether ANY has the basis beside
+it, which is both honest and immune to the comment.
+
+======================================================================
 ## THE LIBRARY PATH WAS NOT SANITISED — anyone could write into LEE3D-Lib. Fixed 2026-09-21.
 ======================================================================
 _The most serious thing in this audit, and it is not geometry. Found by reading `storage.py`,
@@ -1870,10 +1922,9 @@ checks the process was left as it was found. Mutation-checked: drop the `finally
 fails.
 
 ### NEITHER REPO HAD A `.gitignore`. THE SUITE WRITES INTO ONE OF THEM.
-**NOT SHIPPED — GitHub's mobile flow would not create a dotfile, so as of 2026-09-21 neither
-repo has one and the risk below is still live.** Do not assume they landed. On a desktop
-browser the pre-filled form works: `github.com/BEARME-A/<repo>/new/main?filename=.gitignore`.
-The two files were written and are in that session's outputs.
+**SHIPPED — both, from desktop.** They would not go in from mobile: GitHub's mobile flow will
+not create a dotfile. If that comes up again, the pre-filled form on a desktop browser works:
+`github.com/BEARME-A/<repo>/new/main?filename=.gitignore`.
 `config.DATA_DIR` defaults to `./data`, so every local `pytest` leaves `data/lee3d.db` and
 `data/generated/` in the backend repo root, next to `__pycache__` and `.pytest_cache`. Nothing
 has been committed yet. One `git add -A` puts a SQLite cache and a pile of bytecode into the
@@ -4204,8 +4255,7 @@ Shipped: **index.html 2ec42560**, **test/core.test.mjs da8bf2ac**, **app/hull.py
 **app/main.py 91536f59**, **app/pdf_import.py 70a44f01**, **tests/test_hull.py f64df4f3**,
 **tests/test_pdf_geometry.py e1fc7cb5**, **.github/workflows/ci.yml**, **README.md**,
 **environment.yml**, **app/vision.py**, **app/storage.py**, **tests/test_storage.py**, and
-**LEE3D-Frontend/ARCHITECTURE.md**. (`.gitignore` for both repos was written and could not be
-committed from mobile — still outstanding.)
+**LEE3D-Frontend/ARCHITECTURE.md**. (`.gitignore` landed in both repos.)
 
     backend        125 passed, 1 skipped, 1 deselected
     frontend       290 of 290 — 84+80+20+20+30+25+31, summing exactly to t_calls
@@ -4277,8 +4327,7 @@ pinned by a test that asserts the RESOLVED URL. Full section above.
   which is safe only because that filename sorts last. Restored in a `finally`, with a guard.
 - **Neither repo had a `.gitignore`**, and the suite writes `data/` into the backend root on
   every run. The frontend's real exposure is `_site/` — a staged studio carrying the real
-  Supabase and backend strings. **These two did NOT ship**: GitHub's mobile flow would not
-  create a dotfile. Still outstanding.
+  Supabase and backend strings. Both shipped from desktop; mobile will not create a dotfile.
 - **`app/vision.py` claimed scale still has to be typed in.** True of a photo, false of the app.
 
 **ALSO SHIPPED, all documentation and all of it actively wrong**
@@ -4291,9 +4340,13 @@ pinned by a test that asserts the RESOLVED URL. Full section above.
 - `environment.yml` called itself "the supported way" while pinning a kernel older than the one
   CI tests. It now says which it is.
 
+**THE OPEN DECISION IS CLOSED.** `profileScaleFromTrace` is wired, on the page basis, and the
+measured size is reported in the send toast. Full section above.
+
 **OPEN**
 - `test_cad.py::test_generate_stl_full_resolution` still has not run against the lathe changes.
-- `profileScaleFromTrace()` is still unwired and the basis is still Collin's decision.
+- Wiring the measured real length into "Build it at a scale" — deliberately not done; the
+  number is reported first so Collin can check it against a sheet he knows.
 - `OPEN ITEMS #5` vs the ADAPTIVE WALL retirement, still contradictory, still one word.
 
 ----------------------------------------------------------------------
