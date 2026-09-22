@@ -1,5 +1,6 @@
 # LEE3D — STATUS
-_Last updated: **2026-08-30** (underside open 2.1-5mm; plank, carve tearing and the missing level-base cut all fixed)._
+_Last updated: **2026-09-21** (audit: a plank in the EXACT build, the two PDF endpoints indexing
+different lists again, a crop overstating its own paper, and a PDF read running off the end)._
 _Live: https://bearme-a.github.io/LEE3D-Frontend/ — deploy gated on the core suite._
 
 A dated CHANGELOG is at the bottom of this file. Add to it every session — it is the only
@@ -1751,6 +1752,156 @@ including the plank work, which is fine, but a field-vs-stamp comparison that do
 
    Both matter because the volume in the studio header is what someone estimates filament from,
    and neither number is currently the thing that gets printed.
+
+======================================================================
+## FOUR BUGS FROM AN AUDIT — 2026-09-21. Two of them silent, one in the exported part.
+======================================================================
+_No report prompted these. All four came out of reading the two ends against each other and
+then MEASURING, and three of the four were invisible to every existing test._
+
+### 1. A PLANK, IN THE EXACT BUILD. `open_the_underside` stepped by the wrong length.
+The floor is removed by sweeping the cavity downward as a union of translated copies. The step
+was the FLOOR THICKNESS. On a body that is short relative to its wall the cavity is THINNER
+than the floor, so the very first copy clears the original and the band between them is never
+cut — a plate of material with open air above AND below it. That is the definition of a plank
+this file settled on three sessions ago, and it was in the STEP.
+
+Ray straight up at (50, 0) through the `_block_with([])` block, uniform wall, before the fix:
+
+    wall 13.0   cavity 14.0mm   material 27.0-40.0                  the roof, correct
+    wall 13.4   cavity 13.2mm   material 13.2-13.4 AND 26.6-40.0    a slab
+    wall 14.0   cavity 12.0mm   material 12.0-14.0 AND 26.0-40.0    a slab
+    wall 18.0   cavity  4.0mm   material  4.0-18.0 AND 22.0-40.0    a slab
+
+**The threshold retro-predicts exactly**: the slab appears the moment the floor exceeds the
+cavity height, i.e. `3*wall > height` uniform and `2*bottom + top > height` per face. One valid
+solid, plausible volume, unchanged bounding box, `hollow_failed` False at every one of them.
+
+**This is the SAME fault as `test_the_open_underside_cut_has_to_overlap_the_cavity` pins, one
+size down.** That test and the other underside test both use a 5mm wall on a 40mm block, where
+the cavity is 30mm tall and a 5mm step overlaps comfortably. The fixtures reproduced the shape
+of the bug and not the geometry that causes it — the third time this file has recorded that
+exact failure.
+
+**FIX:** step by the height the shape has NOW, which guarantees the copy overlaps, and keep
+going until the sweep is below the body. Each union doubles the extent, so it converges in a
+handful of passes however thin the cavity starts. Measured after: one run on the ray at every
+wall from 5 to 19.9, one valid solid throughout, and the per-face results stop depending on a
+floor thickness that an open underside does not have.
+
+Pinned by RAY PARITY, not by volume — at wall 14 the slab is 4,608mm3 of 184,704, well inside
+anything a volume tolerance would allow. Mutation-checked.
+
+**Who this reached:** nobody at 2.1mm on an 84mm car. A load-bearing bracket with a thick floor
+— Curtis's case, and the reason per-face wall exists at all — sits right on it.
+
+### 2. THE TWO PDF ENDPOINTS INDEXED DIFFERENT LISTS AGAIN.
+`read_sheet` publishes every titled detail and attaches `frame` to the ones it can place; its
+comment says "ONE LIST, ONE INDEX". `/import/pdf/detail` indexed
+`[d for d in sheet["details"] if d.get("frame")]` — a FILTERED copy. One unplaceable detail and
+every index after it shifts. Reproduced on a built two-detail sheet, at rotation 0 and 270:
+
+    listing index 0 = WAYFINDING SIGN              crop returned MAIN COLUMN FRONT ELEVATION
+    listing index 1 = MAIN COLUMN FRONT ELEVATION  ->  404 "detail 1 of 1"
+
+The crop returns `seg["title"]` and `seg["scale"]` from the same wrong entry, so the title and
+scale come back CONSISTENT WITH THE WRONG PICTURE. Nothing downstream can tell.
+
+**This is the fault recorded as closed on 2026-08-30, reintroduced by the fix for it.** That fix
+attached the frame to the listed details, which was right; the endpoint kept its filter.
+
+**FIX:** index `sheet["details"]` itself. A detail the sheet never boxed gets its own 404 naming
+itself, rather than the next detail's picture.
+
+`test_the_listing_and_the_crop_agree_on_which_detail_is_which` could not see it: its fixture has
+one detail and that detail is framed, so the filter never drops anything. New fixture
+`_mixed_sheet_pdf` draws the unboxed one FIRST so it takes index 0 and shifts the other.
+
+### 3. A CROP REPORTED PAPER THE IMAGE DOES NOT COVER.
+`get_pixmap(clip=)` intersects the clip with the page, and a frame drawn at the sheet edge runs
+off it as soon as the 2mm margin is added. `frame_mm` reported the rectangle that was ASKED
+FOR. That figure is exactly what `drawnSpanToReal` divides a traced span by at the other end.
+
+    frame at x0 = 0, dpi 100:   image 842px wide, reported 215.67mm wanted 849px   -0.83%
+
+Small here because the margin is 2mm of 215; it is bounded only by how far the frame runs off
+the sheet. And it is the silent kind: the building comes out plausible and quietly small, like
+the axes swap and the 304.8mm offset before it.
+
+**FIX:** derive `frame_mm` and `origin_mm` from the CLIP, so the two agree by construction.
+Every frame that fits on the page is unchanged.
+
+### 4. READING A PDF RAN OFF THE END OF THE DOCUMENT.
+`impPdfPick` walked to page 12 whatever the file held, with ONE try around the whole loop.
+Asking for a page past the end is a 400, so on any set shorter than twelve pages where NO page
+carries titled details, the loop fell out of the bottom into the catch and said
+
+    Couldn't read Drawings.pdf: the backend could not read page 9
+
+which reads as a broken file. The honest message written for exactly that case sat below it,
+**unreachable** unless the PDF happened to have twelve pages or more.
+
+**FIX:** each page is read inside its own try. A failure past page 0 ends the walk and keeps the
+last page that did read; only page 0 failing means the FILE could not be read.
+
+### AND TWO SMALLER THINGS FOUND ON THE WAY
+
+**A dead no-op in `build_lathe`, wearing a comment that described a sweep:**
+
+    drop = H + 2.0 * max(H, 1.0)
+    cavity = inner.union(inner.translate((0, 0, -drop * 0.0)))
+
+`-drop * 0.0` is zero. `drop` was computed and thrown away and the union was `inner` with
+itself — a CSG pass per lathe export, doing nothing. No sweep is needed there: the radius
+profile's lowest point IS the body's floor and `solid_from` closes the wire to the axis at that
+same z, so the cavity's bottom face is already coplanar and the cut opens it. Measured on a
+fountain at a 4mm wall, a ray up the axis finds material only from z=70, the top cap. Removing
+it is geometry-neutral — walls 2/4/8/20/45 agree to within 0.05mm3 on bodies of 150,000 to
+480,000mm3.
+
+**A detail title out of a PDF reached `innerHTML`.** `toast(html)` is an innerHTML sink by
+design and most of its callers pass markup on purpose. `impPdfUseDetail` interpolated
+`det.title` into it, and a title comes out of an arbitrary PDF — Dylan's set arrives from a
+third-party studio. The picker list was built carefully with `textContent` for exactly this
+reason and then the toast for the same title built HTML around it. `htmlSafe()` now escapes at
+the interpolation, plus the file name on the three `impPdfPick` toasts. The studio also took
+the plot scale from its own listing rather than from the crop the backend returned; it now
+reads the copy that came with the picture.
+
+### THE GHOST CHECK CAUGHT MY COMMENT, WHICH IS THE TRAP FROM THE OTHER SIDE
+The suite asserts `escapeHTML(` never appears, because that helper was once CALLED without
+existing. My first draft of the new helper explained in a comment why it is not named that —
+and the grep fired on the comment. This file already records that a test for a string's ABSENCE
+is fooled by a comment describing that string; this is the same fact wearing the opposite coat,
+and **the check was right both times**. The comment changed, not the check.
+
+### WHAT WAS AUDITED AND FOUND SOUND, so nobody re-checks it
+- **The remaining presence-style guards in `hull.py`** (lines ~637, ~711, ~897, ~908, ~920).
+  Swept the per-face floor from 5 to 60mm and the uniform wall to the inradius and past it: a
+  collapsed plane raises inside `cavity_uniform`, an over-trimmed cavity comes back as 0 solids
+  rather than a zero-volume one, and every failure path reports `hollow_failed` and returns the
+  solid. Nothing reaches a boolean with a zero-volume operand.
+- **The lathe hollow at any wall.** Volume rises monotonically toward the solid as the wall
+  grows past the radius — 2, 4, 8, 20, 29, 30, 31, 45, 80mm all give one valid solid. No
+  collapse, no destroyed model.
+- **Every callable in `index.html`.** Comment- and string-stripped scan of defined names against
+  called names: no invented helpers. `sideAt`, `envSideAt` and `loftBox` are bound later and are
+  fine.
+- **`impRenderPages`** puts the page name in with `textContent` after building its template, so
+  that path was already safe. Only the toast leaked.
+
+### STILL OPEN AND NOT TOUCHED
+- `profileScaleFromTrace()` is still wired to nothing, and the choice of basis in HANDOFF §6 is
+  still Collin's. Confirmed by grep: `view.drawing` is written at the crop-to-view assignment
+  and read nowhere.
+- `tests/test_cad.py::test_generate_stl_full_resolution` STILL has not run against the lathe
+  changes. It does not fit a tool call and that has not changed.
+- `app/vision.py`'s docstring says the user "still sets scale in the UI" and that reading
+  dimensions off a page is a research problem. That is true of a PHOTO, which is all that file
+  handles, and false of the PDF path now beside it. Left alone rather than re-shipped for a
+  comment, but worth a line when that file is next opened.
+- `OPEN ITEMS #5` vs the ADAPTIVE WALL retirement is still contradictory and still waiting on
+  one word from Collin.
 
 ======================================================================
 ## HANDOFF.md REWRITTEN 2026-08-30 — the old one is WRONG, delete it
@@ -3803,6 +3954,64 @@ Both mistakes pointed at app bugs that did not exist. The probe is `probe/outlin
 _Newest first. Add an entry every session. Dates are the session date; earlier sessions
 predate this log and are marked undated because inventing dates for them would be worse
 than admitting they are unknown._
+
+----------------------------------------------------------------------
+## 2026-09-21 — an audit with no report behind it: four bugs, three of them silent
+----------------------------------------------------------------------
+Shipped: **index.html 2ec42560**, **test/core.test.mjs da8bf2ac**, **app/hull.py 8d7a6e0d**,
+**app/main.py 91536f59**, **app/pdf_import.py 70a44f01**, **tests/test_hull.py f64df4f3**,
+**tests/test_pdf_geometry.py e1fc7cb5**.
+
+    backend        123 passed, 1 skipped, 1 deselected   (was 118/1/1 — five new tests)
+    frontend       289 of 289, seven slices summing exactly to t_calls
+    schema checker clean
+
+**FOCUS:** read the two ends against each other and measure the disagreements. No report
+prompted any of this.
+
+**THE MANIFEST AUDIT CAME BACK CLEAN** — all seventeen files match, which is the first time in
+this document that section has not found something. The environment numbers reproduce too:
+118/1/1 and not 98/20, so the symlinks and cadquery were in place before the first edit.
+
+**WHAT WORKED**
+- **A plank in the EXACT build**, from `open_the_underside` stepping by the floor thickness
+  instead of by the cavity's own height. Threshold retro-predicts at `3*wall > height`. Full
+  section above.
+- **The two PDF endpoints indexing different lists** — the fault closed on 2026-08-30 and
+  reintroduced by the fix for it, because the fix attached the frame to the listing and the
+  endpoint kept its filter.
+- **A crop reporting paper it does not cover**, which is the figure the studio divides a traced
+  span by.
+- **A PDF read running off the end of the document**, which made the honest error message
+  unreachable on any set shorter than twelve pages.
+- **A dead `-drop * 0.0` union in `build_lathe`** and **a PDF title reaching `innerHTML`**.
+- **Every fix mutation-checked.** Backend: three mutants, each test red, plus a fourth for the
+  rewritten plan-sheet test. Frontend: four mutants, all three new tests red, and the source
+  half of the title test re-checked on its own so the behavioural half could not mask it.
+
+**WHAT FAILED, and both were mine**
+- **My comment tripped the ghost check.** Explaining why the new helper is not named
+  `escapeHTML` put that string in the file, and the suite greps the whole file for it. The check
+  was right; the comment was wrong. Same fact as the absence-test trap already in here, from the
+  other side.
+- **My own fixture carried a stray backslash.** The quote test wrote its input as `'...\\""'`,
+  which puts a literal backslash in the string, and then expected it not to come back. I nearly
+  went looking at the escaper. **Check the fixture before believing a discrepancy it reports** —
+  this file says so about a sphere profile and it applied here unchanged.
+
+**A NOTE ON THE FIXTURES, because it is three for three now**
+Every one of the three silent bugs was invisible to a test that already covered the area, and in
+each case for the same reason: the fixture reproduced the SHAPE of the thing and not the
+geometry that causes the fault. A 5mm wall on a 40mm block cannot show a step that overshoots a
+cavity. A sheet whose only detail is framed cannot show a filter dropping one. A frame in the
+middle of the page cannot show a clip being truncated at its edge. **The question to ask of a
+fixture is not "is this the right kind of object" but "does this one actually reach the
+branch".**
+
+**OPEN**
+- `test_cad.py::test_generate_stl_full_resolution` still has not run against the lathe changes.
+- `profileScaleFromTrace()` is still unwired and the basis is still Collin's decision.
+- `OPEN ITEMS #5` vs the ADAPTIVE WALL retirement, still contradictory, still one word.
 
 ----------------------------------------------------------------------
 ## 2026-08-30 (later still) — the underside: root cause FOUND, backend fixed, STUDIO FIX FAILED THE GATE
