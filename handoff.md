@@ -23,17 +23,17 @@ the bugs in `STATUS.md` are one end quietly building something different from th
 
 ## 2. CURRENT FILE MANIFEST — verify these before touching anything
 
-    LEE3D-Frontend/index.html                      a7d9241a
-    LEE3D-Frontend/test/core.test.mjs              cf705dd6
-    LEE3D-Backend-A/app/hull.py                    73d8a585
-    LEE3D-Backend-A/app/main.py                    34af2399
+    LEE3D-Frontend/index.html                      2ec42560
+    LEE3D-Frontend/test/core.test.mjs              da8bf2ac
+    LEE3D-Backend-A/app/hull.py                    8d7a6e0d
+    LEE3D-Backend-A/app/main.py                    91536f59
     LEE3D-Backend-A/app/schemas.py                 ac7d7611
-    LEE3D-Backend-A/app/pdf_import.py              fd8ba609
+    LEE3D-Backend-A/app/pdf_import.py              70a44f01
     LEE3D-Backend-A/app/cad.py                     a1ce4b21
-    LEE3D-Backend-A/tests/test_hull.py             fefeaecf
+    LEE3D-Backend-A/tests/test_hull.py             f64df4f3
     LEE3D-Backend-A/tests/test_deploy.py           96b345ed
     LEE3D-Backend-A/tests/test_schema_contract.py  eba4d6fd
-    LEE3D-Backend-A/tests/test_pdf_geometry.py     5fa99d07
+    LEE3D-Backend-A/tests/test_pdf_geometry.py     e1fc7cb5
     LEE3D-Backend-A/tests/test_cad.py              a5d53a3e
     LEE3D-Backend-A/conftest.py                    75d923b5   (repo ROOT, not app/)
     LEE3D-Backend-A/requirements.txt               62d4dba6
@@ -61,7 +61,7 @@ previous session shipped schema changes for several turns with the schema contra
 silently skipping and reported "98 passed" the whole time.
 
     wrong setup    98 passed,  20 skipped
-    right setup   118 passed,   1 skipped, 1 deselected
+    right setup   123 passed,   1 skipped, 1 deselected
 
 The one legitimate skip is a clean-error path that can only be exercised *without* OpenCascade.
 
@@ -81,14 +81,18 @@ cd repos && python3 LEE3D-Lib-main/tools/check_schema_coverage.py \
 `test_generate_stl_fast` covers the same path at 16/12 in ~10s. Note the rename: pytest
 `--deselect` matches node ids by PREFIX, so the old shared prefix deselected both.
 
-**Frontend** — 286 tests, too slow to run whole. Copy to a scratch dir, inject a slice guard,
+**Frontend** — 289 tests, too slow to run whole. Copy to a scratch dir, inject a slice guard,
 run in seven slices:
 
 ```
-0:80  80:160  160:180  180:200  200:230  230:255  255:300
+0:83  83:163  163:183  183:203  203:233  233:258  258:300
 ```
 
-Slice `160:180` is the slow geometry one (~150-250s) — give it its own call with `timeout 280`.
+(These moved by 3 on 2026-09-21: three tests were added at indices 28-30, ahead of every old
+boundary. Re-derive them whenever tests are added early in the file, or a slice silently covers
+the wrong tests.)
+
+Slice `163:183` is the slow geometry one (~150-250s) — give it its own call with `timeout 280`.
 Others take 10-120s; pair them at most two per call or you will hit the 300s command ceiling.
 The scratch copy needs `index.html` symlinked beside `test/`. **Never ship the sliced copy** —
 the slice guard is a scratch hack.
@@ -127,7 +131,9 @@ Test file: `Drawings.pdf` — ELM Studio, Saratoga Springs / Cathedral Oak Parkw
 - **Frame segmentation** — the sheet draws an exact 181.0 × 368.3mm grid; 160,438 of 163,293
   strokes assign to a frame, 9 of 9 details placed.
 - **`render_detail`** — one detail cropped for tracing, right way up.
-- **Endpoints** — `POST /import/pdf/sheet` and `POST /import/pdf/detail`.
+- **Endpoints** — `POST /import/pdf/sheet` and `POST /import/pdf/detail`. Both index the
+  SAME list, `sheet["details"]`; a detail the sheet never boxed 404s by name rather than
+  returning the next one. This has now been got wrong twice, in opposite directions.
 - **Studio** — a dropped PDF is read, its details listed and tappable, the chosen one loaded as
   a trace reference at the scale it was drawn at.
 
@@ -190,7 +196,15 @@ Either needs the box rect carried alongside the drawing record.
    way. `field` is closer to the export but has 86 badly-wound edges; `stamp` is clean but
    overstates material removed by ~2.7×. Neither affects what prints.
 4. **`test_cad.py` full resolution** — CI only, and it has **not** run against the lathe
-   changes in `hull.py` (`73d8a585`). Last confirmed green at the older `3d50756e`.
+   changes in `hull.py`. Last confirmed green at the older `3d50756e`.
+5. **A thick-floor part with the underside open.** The 2026-09-21 fix removes a floating slab
+   that the exact build used to leave whenever the floor was thicker than the cavity
+   (`3*wall > height` uniform, `2*bottom + top > height` per face). It is measured on a ray and
+   pinned by a test, but nobody has looked at such a part on screen or printed one. Anything
+   short and thick-walled is the case to try.
+6. **A PDF whose details are not all boxed.** `/import/pdf/detail` now refuses an unboxed detail
+   by name instead of handing back its neighbour's drawing. Worth one drop of a real sheet to
+   see that the refusal reads sensibly in the picker.
 
 ---
 
@@ -212,9 +226,15 @@ These are distilled from `STATUS.md`. Every one cost a session.
 **Tests must be able to fail.**
 - Mutate the code and watch the test go red. Several tests here passed their first mutation
   and proved nothing.
-- A fixture must reproduce the geometry that CAUSED the bug, not merely its shape. Three
-  separate fixtures failed this: a decoy ranked by the term under test, a sheet number listed
-  first so first-seen and largest agreed, and 20mm of clearance that made 12mm padding harmless.
+- A fixture must reproduce the geometry that CAUSED the bug, not merely its shape. Six
+  separate fixtures have now failed this: a decoy ranked by the term under test, a sheet number
+  listed first so first-seen and largest agreed, 20mm of clearance that made 12mm padding
+  harmless, a 5mm wall on a 40mm block that could not show a sweep overshooting its cavity, a
+  one-detail sheet that could not show a filter dropping one, and a frame in the middle of the
+  page that could not show a clip truncated at its edge. The question is not "is this the right
+  kind of object" but "does this one actually reach the branch".
+- Ask what a fix at ONE end leaves true at the other. The PDF index bug was reintroduced by its
+  own fix: the listing gained a frame per detail and the endpoint kept filtering on it.
 - A test for a string's ABSENCE is fooled by a comment describing that string. Prefer a
   positional or behavioural check.
 - `t()` blocks, `h()` only warns. Using `h()` for something that must block means it ships.
