@@ -1,9 +1,19 @@
 # Conda environment that includes the CAD kernel (OpenCascade via cadquery).
-# This is the supported way to get /generate working.
 #
 #   conda env create -f environment.yml
 #   conda activate lee3d
 #   uvicorn app.main:app --reload --port 8000
+#
+# THIS IS NO LONGER "the supported way", and that line is removed rather than softened.
+# `pip install cadquery` brings 2.8.0 down cleanly on Linux with Python 3.11+, and that is what
+# CI installs and what the `cad` job runs the geometry against. The belief that pip could not
+# do it is why the kernel tests ran nowhere at all for months.
+#
+# **The pin below is 2.4, which is OLDER than what the tests run against.** Kept because it is
+# known to solve and someone may be relying on it — but a local conda build is a different
+# OpenCascade from the one any result in STATUS.md was measured on, and this project has been
+# bitten more than once by two ends quietly disagreeing about what they are building. If you
+# raise it to 2.8, say so in STATUS.md and re-run the kernel tests before trusting a number.
 name: lee3d
 channels:
   - conda-forge
