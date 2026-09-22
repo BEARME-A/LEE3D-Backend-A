@@ -67,7 +67,7 @@ and a step fails the build if the schema contract or the studio-vs-backend tests
 ever see those two skip locally, the sibling layout above is wrong; that is the whole of it.
 
     wrong setup    98 passed,  20 skipped
-    right setup   123 passed,   1 skipped, 1 deselected
+    right setup   124 passed,   1 skipped, 1 deselected
 
 The one legitimate skip is a clean-error path that can only be exercised *without* OpenCascade.
 
@@ -87,18 +87,18 @@ cd repos && python3 LEE3D-Lib-main/tools/check_schema_coverage.py \
 `test_generate_stl_fast` covers the same path at 16/12 in ~10s. Note the rename: pytest
 `--deselect` matches node ids by PREFIX, so the old shared prefix deselected both.
 
-**Frontend** — 289 tests, too slow to run whole. Copy to a scratch dir, inject a slice guard,
+**Frontend** — 290 tests, too slow to run whole. Copy to a scratch dir, inject a slice guard,
 run in seven slices:
 
 ```
-0:83  83:163  163:183  183:203  203:233  233:258  258:300
+0:84  84:164  164:184  184:204  204:234  234:259  259:300
 ```
 
-(These moved by 3 on 2026-09-21: three tests were added at indices 28-30, ahead of every old
+(These moved by 4 on 2026-09-21: four tests were added at indices 28-31, ahead of every old
 boundary. Re-derive them whenever tests are added early in the file, or a slice silently covers
 the wrong tests.)
 
-Slice `163:183` is the slow geometry one (~150-250s) — give it its own call with `timeout 280`.
+Slice `164:184` is the slow geometry one (~150-250s) — give it its own call with `timeout 280`.
 Others take 10-120s; pair them at most two per call or you will hit the 300s command ceiling.
 The scratch copy needs `index.html` symlinked beside `test/`. **Never ship the sliced copy** —
 the slice guard is a scratch hack.
