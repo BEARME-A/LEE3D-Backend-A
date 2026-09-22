@@ -1,0 +1,27 @@
+# There was no .gitignore here, and the test suite writes into the repo on every local run:
+# `config.DATA_DIR` defaults to ./data, so `data/lee3d.db` and `data/generated/` appear beside
+# the code. Nothing has been committed yet — but one `git add -A` puts a SQLite cache and a
+# pile of bytecode into a repo whose whole job is to be the authority on what the backend is.
+#
+# Everything listed here is a CACHE OR AN OUTPUT. render.yaml says it plainly: the models live
+# in Supabase and in LEE3D-Lib, and the index rebuilds itself. Nothing below is worth keeping.
+
+# the local data dir (LEE3D_DATA_DIR, default ./data)
+data/
+*.db
+*.db-journal
+
+# generated artefacts, wherever the data dir lands
+generated/
+
+# python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+*.egg-info/
+.venv/
+venv/
+
+# secrets — LEE3D_GITHUB_TOKEN belongs in the Render dashboard, never in git
+.env
+.env.local
