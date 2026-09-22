@@ -9,20 +9,29 @@ Repo: `https://github.com/BEARME-A/LEE3D-Backend-A`
 
 ## Setup
 
-CadQuery needs OpenCascade, which is **not** reliable via `pip`. Use conda:
-
 ```bash
-conda env create -f environment.yml     # python 3.11 + cadquery 2.4 + everything
-conda activate lee3d
+pip install -r requirements.txt
+pip install cadquery                    # 2.8.0, Linux + Python 3.11+, a couple of minutes
 uvicorn app.main:app --reload --port 8000
 ```
 
 Open **http://localhost:8000/docs** for interactive API docs.
 
-> The API **boots without the CAD kernel** too (e.g. `pip install -r
-> requirements.txt`). In that mode every endpoint works except `/generate`,
-> which returns a clear `503` telling you to set up the conda env. This keeps
-> imports, storage, and library commits usable while you sort CAD out.
+> This paragraph used to say CadQuery was **not** reliable via `pip` and send you to conda.
+> That was true of cadquery 2.4 and stopped being true; the same sentence in
+> `requirements.txt` and in `ci.yml` was what kept the kernel tests from running **anywhere**
+> for months, while the exact build's geometry went unchecked. `pip install cadquery` is now
+> what CI installs and what the `cad` job runs the geometry against, so it is the route that
+> is actually tested.
+
+> `environment.yml` still exists and still works, but it pins **cadquery 2.4** — an older
+> kernel than CI tests. Prefer pip unless you have a reason not to; if you use conda, know
+> that you are building against a different OpenCascade from the one the tests ran on.
+
+> The API **boots without the CAD kernel** too (`pip install -r requirements.txt` alone).
+> In that mode every endpoint works except `/generate`, which returns a clear `503` saying
+> the kernel is missing. That keeps imports, storage, and library commits usable while you
+> sort CAD out, and it is what the light Docker image ships.
 
 ## Endpoints
 
