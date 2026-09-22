@@ -68,3 +68,52 @@ def test_the_storage_test_leaves_no_trace():
 
 if __name__ == "__main__":
     test_project_and_version_roundtrip()
+
+
+def test_a_library_path_cannot_climb_out_of_its_folder():
+    """THE BACKEND HOLDS A GITHUB WRITE TOKEN, AND THIS FUNCTION DECIDES WHERE IT WRITES.
+
+    `library_path` is the single choke point for both commit sites: `/import/image` takes
+    `project` from a form field and the name from the upload, `/generate` uses `profile.name`.
+    All three are attacker-controlled on an unauthenticated endpoint — CORS is a browser policy
+    and the Render URL answers curl like any other.
+
+    The result goes into a GitHub Contents API URL, and **httpx resolves `..` before the
+    request leaves**, so a path that merely looks odd lands somewhere else entirely. Measured
+    against the old implementation:
+
+        project="../.github/workflows", filename="x.yml"
+          path -> drawings/../.github/workflows/x.yml
+          URL  -> /repos/OWNER/REPO/contents/.github/workflows/x.yml
+
+    A workflow file in LEE3D-Lib is arbitrary code in that repo's Actions.
+
+    ASSERTED AGAINST THE RESOLVED URL, not against the string. A path can contain `..` and be
+    harmless, and can look clean and still resolve away — the only question that matters is
+    where the request actually goes, so that is what this compares."""
+    import httpx
+    from app.storage import library_path
+
+    hostile = [
+        ("drawing", "../.github/workflows", "x.yml"),
+        ("drawing", "misc", "../../.github/workflows/x.yml"),
+        ("drawing", "a/b/c", "d.png"),
+        ("drawing", "..", ".."),
+        ("drawing", "....//....//x", "..\\..\\y.yml"),
+        ("photo", ".", "./../../README.md"),
+        ("json", "ok", "sub/dir/deep.json"),
+        ("generated", "   ", ""),
+    ]
+    for kind, project, filename in hostile:
+        path = library_path(kind, project, filename)
+        resolved = str(httpx.URL(f"https://api.github.com/repos/O/R/contents/{path}"))
+        resolved = resolved.split("contents/", 1)[1]
+        assert resolved == path, (
+            f"{project!r}/{filename!r} builds {path!r} but the request goes to {resolved!r}")
+        assert len(path.split("/")) == 3, f"{path!r} is not folder/project/name"
+        assert path.split("/")[0] in ("drawings", "photos", "json", "generated"), path
+
+    # and the ordinary case is untouched — this is a rebuild, not a rejection
+    assert library_path("drawing", "1968 charger", "side.png") == "drawings/1968-charger/side.png"
+    assert library_path("generated", "charger-body", "charger.step") == \
+        "generated/charger-body/charger.step"
