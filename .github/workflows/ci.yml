@@ -1,9 +1,24 @@
 name: ci
 
-# Fast, reliable CI. Installs only the lightweight deps and runs the tests that
-# don't need the CAD kernel. test_cad self-skips when cadquery isn't installed,
-# so we DON'T pay for a slow/flaky conda + OpenCascade solve on every push.
-# The CAD path is exercised locally via environment.yml (conda).
+# Fast, reliable CI: the light deps and everything that does not need the CAD kernel, with the
+# kernel in its own job below so a heavy dependency can never slow or break the merge gate.
+#
+# THE HEADER HERE USED TO SAY "the CAD path is exercised locally via environment.yml (conda)".
+# It was not exercised anywhere: the skip guard was inverted, and the same claim in
+# requirements.txt was corrected months before this line was. A stale first paragraph sends the
+# next reader at a problem that does not exist, or away from one that does — this file carried
+# its own refutation forty lines down and still opened with the wrong sentence.
+#
+# BOTH JOBS CHECK OUT ALL THREE REPOS. That is not tidiness. Several of the tests here are
+# BOTH-ENDS tests — they read the studio's index.html, or a real traced profile out of the
+# library — and without the siblings they do not fail, they SKIP, and a skip reads as a pass in
+# the summary line. Measured on this repo checked out alone, which is what this file used to do:
+#
+#     114 passed, 10 skipped        <- what CI reported on every push
+#
+# and the ten were: the whole schema contract (4), both real-traced-car hollow tests, both
+# studio-vs-backend tests, the sheet schema contract, and one legitimate no-kernel skip. Every
+# artefact this project built to catch the two ends disagreeing was among them.
 
 on: [push, pull_request]
 
@@ -11,32 +26,76 @@ jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      # into a subdirectory, so the other two can sit BESIDE it — which is where the tests look
+      - name: The exact backend
+        uses: actions/checkout@v4
+        with:
+          path: LEE3D-Backend-A
+
+      # NO continue-on-error, deliberately, and this differs from LEE3D-Lib's schema.yml on
+      # purpose. There a skipped checkout still leaves the checker validating every profile, so
+      # the step is never a no-op. Here a missing sibling turns nine real tests into skips and
+      # the job still goes green, so a checkout that cannot happen SHOULD stop the build.
+      - name: The shared library (schemas, and the real traced profiles the hull tests load)
+        uses: actions/checkout@v4
+        with:
+          repository: BEARME-A/LEE3D-Lib
+          path: LEE3D-Lib
+
+      - name: The studio (the both-ends tests read index.html directly)
+        uses: actions/checkout@v4
+        with:
+          repository: BEARME-A/LEE3D-Frontend
+          path: LEE3D-Frontend
 
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
           cache: pip
+          cache-dependency-path: LEE3D-Backend-A/requirements.txt
 
       - name: Install light deps (no CAD kernel)
+        working-directory: LEE3D-Backend-A
+        # pillow is a TEST dependency, not an app one, which is why it is here and not in
+        # requirements.txt. Without it the crop-content check self-skips — and that is the test
+        # that caught a crop landing on blank paper, which a size check cannot see.
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt pytest
+          pip install -r requirements.txt pytest pillow
 
       - name: App boots without the CAD kernel
+        working-directory: LEE3D-Backend-A
         run: python -c "import app.main; print('app imports OK')"
 
-      - name: Run tests (storage + schema full; CAD self-skips)
-        run: pytest -q
+      - name: Run tests (CAD self-skips; -rs so every skip states its reason)
+        working-directory: LEE3D-Backend-A
+        run: pytest -q -rs
+
+      - name: The both-ends guards must have RUN, not skipped
+        working-directory: LEE3D-Backend-A
+        # ASSERT THE RESULT, NOT THE CHECKOUT. A checkout that succeeds and lands in the wrong
+        # place looks identical from up here, and the whole failure being guarded against is one
+        # that reports green. Neither of these files has a legitimate skip: the schema contract
+        # needs only the library, and the two studio tests read index.html and are not
+        # kernel-gated, so both run in this job and in the cad job alike.
+        run: |
+          set -o pipefail
+          pytest -q -rs tests/test_schema_contract.py | tee /tmp/contract.txt
+          pytest -q -rs tests/test_hull.py -k studio  | tee /tmp/bothends.txt
+          if grep -qi skipped /tmp/contract.txt /tmp/bothends.txt; then
+            echo "::error::a sibling repo is missing or in the wrong place — the schema"
+            echo "::error::contract and the studio-vs-backend tests did not run. They skipped,"
+            echo "::error::and a skip is counted as a pass in the line above."
+            exit 1
+          fi
 
   # THE CAD KERNEL, in its own job so it cannot slow or break the gate above.
   #
-  # The comment at the top of this file — and the note in requirements.txt — said cadquery was
-  # not pip-reliable and had to come from conda, so the kernel tests were left to run locally.
-  # In practice they ran NOWHERE: the skip guard was inverted and skipped unless cadquery had
+  # Why this job exists at all: requirements.txt said cadquery was not pip-reliable and had to
+  # come from conda, and the header of this file said the CAD path ran locally. Between the two,
+  # the kernel tests ran NOWHERE — the skip guard was inverted and skipped unless cadquery had
   # already been imported, which in a fresh pytest run is never. Four tests written to catch a
-  # wrong pocket sat dormant, and `build_solid()` was quietly returning a solid block to every
-  # one of them.
+  # wrong pocket sat dormant while `build_solid()` quietly returned a solid block to every one.
   #
   # `pip install cadquery` works now (2.8.0, Linux, Python 3.11+) and takes a couple of minutes.
   # That is worth paying for on a separate job: this is the only place the exact build's actual
@@ -46,22 +105,46 @@ jobs:
     # never blocks a merge on a heavy dependency that may break on a platform we do not control
     continue-on-error: true
     steps:
-      - uses: actions/checkout@v4
+      - name: The exact backend
+        uses: actions/checkout@v4
+        with:
+          path: LEE3D-Backend-A
+
+      # The two traced-car hollow tests load a real profile from here. They are the ones written
+      # because a six-faced block shells fine and every other test passed while a real car was
+      # exporting solid — so without this checkout the kernel job runs without the case it
+      # exists for.
+      - name: The shared library
+        uses: actions/checkout@v4
+        with:
+          repository: BEARME-A/LEE3D-Lib
+          path: LEE3D-Lib
+
+      - name: The studio
+        uses: actions/checkout@v4
+        with:
+          repository: BEARME-A/LEE3D-Frontend
+          path: LEE3D-Frontend
 
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
           cache: pip
+          cache-dependency-path: LEE3D-Backend-A/requirements.txt
 
       - name: Install with the CAD kernel
+        working-directory: LEE3D-Backend-A
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt pytest cadquery
+          pip install -r requirements.txt pytest pillow cadquery
 
       - name: Confirm the kernel is really there
         # a silent absence would turn every test below into a skip and look like a pass
         run: python -c "import cadquery; print('cadquery', cadquery.__version__)"
 
       - name: Build real geometry
-        # ~5 minutes: OpenCascade is doing the work now rather than being skipped
+        working-directory: LEE3D-Backend-A
+        # ~5 minutes: OpenCascade is doing the work now rather than being skipped.
+        # The one legitimate skip here is the clean-error path, which can only be exercised
+        # WITHOUT the kernel — so exactly one skip is expected in this job and none in the other.
         run: pytest -q -rs
