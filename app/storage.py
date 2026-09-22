@@ -11,6 +11,7 @@ folder layout the brief asked for:
 """
 from __future__ import annotations
 import base64
+import re
 import sqlite3
 import time
 from typing import List, Dict, Optional
@@ -183,7 +184,63 @@ LIB_FOLDERS = {
 }
 
 
+_SAFE_SEGMENT = re.compile(r"[^A-Za-z0-9._-]+")
+
+
+def _one_segment(value: str, fallback: str) -> str:
+    """One path segment, rebuilt from scratch — never a caller's string checked for badness.
+
+    Rebuilding is the point. A blocklist has to anticipate every way of writing a separator,
+    and the interesting ones are the ones nobody thinks of: a backslash, a doubled slash, a
+    bare `..`, a name that is nothing but dots. Keeping only `[A-Za-z0-9._-]` and then taking
+    the last component cannot be talked round, because there is no input for which it returns
+    something with a separator in it.
+    """
+    value = str(value or "").replace("\\", "/")
+    value = value.split("/")[-1]                       # "a/b/c" meant a NAME, not a tree
+    value = _SAFE_SEGMENT.sub("-", value.strip()).strip("-.")
+    if not value:
+        return fallback
+    # cap the stem and keep a recognisable extension, so a very long name does not lose it
+    stem, dot, ext = value.rpartition(".")
+    if dot and stem:
+        value = f"{stem[:64]}.{ext[:12]}"
+    else:
+        value = value[:80]
+    return value or fallback
+
+
 def library_path(kind: str, project: str, filename: str) -> str:
+    """Where a file lands in LEE3D-Lib. **EVERY SEGMENT IS REBUILT.**
+
+    This used to be `project.strip().replace(" ", "-")` and the filename untouched, under a
+    variable called `safe_project`. It was not safe: neither `/` nor `..` was removed from
+    either, and the result is handed straight to the GitHub Contents API as a URL path, signed
+    with the fine-grained PAT that has Contents read+write on LEE3D-Lib. httpx then resolves
+    the `..` segments before the request leaves. Measured:
+
+        project="../.github/workflows", filename="x.yml"
+          path -> drawings/../.github/workflows/x.yml
+          URL  -> /repos/OWNER/REPO/contents/.github/workflows/x.yml
+
+        project="misc", filename="../../.github/workflows/x.yml"   same destination
+
+    Both call sites take their values from an unauthenticated request: `/import/image` reads
+    `project` from a form field and the name from the upload, and `/generate` uses
+    `profile.name`. **CORS does not stop this** — it is a browser policy, and the Render URL
+    answers curl like any other. Writing into `.github/workflows/` of a repo means arbitrary
+    code in that repo's Actions, and LEE3D-Lib's own `schema.yml` already checks out the other
+    two repos.
+
+    Nothing was exploited and nothing needs cleaning up; the hole simply existed for as long as
+    the token has. The fix is at this one function because both call sites go through it, which
+    is the only reason it is a small change.
+    """
     folder = LIB_FOLDERS.get(kind, "generated")
-    safe_project = project.strip().replace(" ", "-") or "misc"
-    return f"{folder}/{safe_project}/{filename}"
+    path = f"{folder}/{_one_segment(project, 'misc')}/{_one_segment(filename, 'file')}"
+    # Belt and braces. If the rebuild above is ever loosened, this still refuses rather than
+    # letting a path out — the failure this guards is silent and the check costs nothing.
+    parts = path.split("/")
+    if len(parts) != 3 or any(p in ("", ".", "..") for p in parts) or parts[0] != folder:
+        raise ValueError(f"refusing to build a library path from {project!r} / {filename!r}")
+    return path
