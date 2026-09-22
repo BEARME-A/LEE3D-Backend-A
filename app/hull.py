@@ -547,15 +547,24 @@ def build_lathe(profile: Dict[str, Any], hollow: bool | None = None):
     p = plan(profile)
     wall = float(p.get("wall") or 0.0)
     if hollow and wall > 0:
-        # An open-bottomed shell: the cavity runs from below the floor up to one wall short of
-        # the top, so the top keeps its thickness and the underside is open — the same shape a
+        # An open-bottomed shell: the cavity runs from the floor up to one wall short of the
+        # top, so the top keeps its thickness and the underside is open — the same shape a
         # printed model wants, and the same convention the rest of this file uses.
+        #
+        # NO DOWNWARD SWEEP IS NEEDED HERE, unlike the hull's `open_the_underside`. The radius
+        # profile's lowest point IS the body's floor and `solid_from` closes the wire down to
+        # the axis at that same z, so the cavity's bottom face is already coplanar with the
+        # solid's and the cut opens it. Measured on a fountain at a 4mm wall: a ray up the axis
+        # finds material only from z=70 (the top cap), i.e. the underside is open.
+        # This line used to read `inner.translate((0, 0, -drop * 0.0))` — a translate by zero,
+        # so the union was `inner` with itself and `drop` was computed and thrown away. A
+        # no-op costing a CSG pass per export, wearing a comment that described a sweep.
+        # Removing it is geometry-neutral: measured at walls 2/4/8/20/45, the volumes agree to
+        # within 0.05mm3 on bodies of 150,000-480,000mm3 — kernel noise, not a shape change.
         inner = solid_from(pts, wall_shift=wall, z_hi=H - wall)
         if inner is not None:
             try:
-                drop = H + 2.0 * max(H, 1.0)
-                cavity = inner.union(inner.translate((0, 0, -drop * 0.0)))
-                trimmed = solid.cut(cavity)
+                trimmed = solid.cut(inner)
                 if trimmed.solids().vals() and sum(s.Volume() for s in trimmed.solids().vals()) > 1e-6:
                     solid = trimmed
                 else:
@@ -870,21 +879,45 @@ def build_solid(profile: Dict[str, Any], hollow: bool | None = None,
             bitten by exactly that before."""
             if inner is None or not open_under:
                 return inner
-            # THE TRANSLATE HAS TO OVERLAP. A first attempt pushed one copy down by more than
-            # the whole body height, which lands it entirely BELOW the part with a gap between
-            # — so the union was two disconnected lumps and the cut removed exactly nothing.
-            # Volume came back identical open and closed, which is the same "identical output
-            # means the code path did not run" signal this file keeps being caught by.
+            # THE STEP IS MEASURED AGAINST THE CAVITY, NOT AGAINST THE WALL. A first attempt
+            # pushed one copy down by more than the whole body height, which lands it entirely
+            # BELOW the part with a gap between — two disconnected lumps, and the cut removed
+            # exactly nothing. Doubling was the answer to that and it is still the answer; it
+            # just has to START from the shape's own height. Stepping by the FLOOR thickness
+            # made the identical mistake one size down: on a body that is short relative to its
+            # wall the cavity is thinner than the floor, so the very first copy clears the
+            # original and the band between them stays SOLID — a plate of material with open
+            # air above and below it, which is a plank, in the exported STEP.
             #
-            # Double instead: each step moves the shape by no more than the height it has
-            # already gained, so every copy overlaps the last and the result is one connected
-            # prism. Three unions reach 7x the floor thickness, which clears it comfortably,
-            # and anything that ends up below the body simply cuts nothing.
-            floor = max(0.2, abs(spec.get("bot") or p["wall"]))
-            ext, d = inner, floor
-            for _ in range(3):
-                ext = ext.union(ext.translate((0, 0, -d)))
-                d *= 2.0
+            # Measured on the 100x40x60 block, uniform wall, ray straight up at (50, 0):
+            #     wall 13.0  cavity 14.0mm tall  ->  material 27.0-40.0            the roof
+            #     wall 13.4  cavity 13.2mm tall  ->  material 13.2-13.4 AND 26.6-40.0
+            #     wall 14.0  cavity 12.0mm tall  ->  material 12.0-14.0 AND 26.0-40.0
+            # The threshold retro-predicts exactly: the slab appears the moment the floor
+            # thickness exceeds the cavity height, i.e. 3*wall > height for a uniform wall and
+            # 2*bottom + top > height per face. One valid solid, plausible volume, unchanged
+            # bounding box and `hollow_failed` False throughout — nothing downstream could see
+            # it. Collin's car is 84mm tall at a 2.1mm wall and never came near it; a
+            # load-bearing bracket with a thick floor sits right on it.
+            #
+            # So: step by the height the shape has NOW, which guarantees the copy overlaps, and
+            # keep going until the sweep is below the body. Each union doubles the extent, so
+            # this converges in a handful of passes however thin the cavity starts.
+            boxes = [s.BoundingBox() for s in inner.solids().vals()]
+            if not boxes:
+                return inner
+            z_lo = min(b.zmin for b in boxes)
+            h = max(1e-6, max(b.zmax for b in boxes) - z_lo)
+            # the body stands on z = 0, so reaching one wall below that clears its floor
+            need = max(0.0, z_lo) + max(0.2, abs(spec.get("bot") or p["wall"])) + 1.0
+            ext, covered = inner, 0.0
+            for _ in range(24):
+                if covered >= need:
+                    break
+                step = min(h, need - covered)
+                ext = ext.union(ext.translate((0, 0, -step)))
+                covered += step
+                h += step                    # the union is exactly that much taller now
             return ext
 
         if wall_varies(spec):
