@@ -1088,3 +1088,61 @@ def test_a_lathe_profile_that_is_junk_raises_rather_than_building_nonsense():
             hull.build_solid({"shape": "lathe", "revProfileV": bad, "revHeight": 100.0,
                               "length": 120.0, "topProfile": [[0, 100], [1, 100]],
                               "widthProfile": [[0, 60], [1, 60]]}, hollow=False)
+
+
+@pytest.mark.skipif(not HAS_CQ, reason="needs OpenCascade")
+def test_opening_the_underside_leaves_no_floating_slab_at_a_thick_wall():
+    # pragma: no cover - needs the kernel
+    """A PLANK, IN THE EXACT BUILD. The floor is removed by sweeping the cavity downward, and
+    the sweep used to step by the FLOOR THICKNESS. On a body that is short relative to its wall
+    the cavity is thinner than the floor, so the first copy clears the original entirely and the
+    band between them is never cut — a plate of material with open air above AND below it.
+
+    That is the same disconnected-lumps fault as
+    `test_the_open_underside_cut_has_to_overlap_the_cavity`, one size down, and neither that
+    test nor any other could see it: both fixtures use a 5mm wall on a 40mm block, where the
+    cavity is 30mm tall and a 5mm step overlaps comfortably. **The fixture has to reproduce the
+    geometry that caused the bug, not merely its shape** — so this one sweeps the wall until the
+    floor is thicker than the cavity.
+
+    Measured before the fix, ray straight up at (50, 0) through a 100x40x60 block:
+
+        wall 13.0   cavity 14.0mm   material 27.0-40.0                 the roof, correct
+        wall 13.4   cavity 13.2mm   material 13.2-13.4 AND 26.6-40.0   a slab
+        wall 14.0   cavity 12.0mm   material 12.0-14.0 AND 26.0-40.0   a slab
+        wall 18.0   cavity  4.0mm   material  4.0-18.0 AND 22.0-40.0   a slab
+
+    The threshold retro-predicts exactly — the slab appears the moment 3*wall exceeds the
+    height — which is the strongest evidence available without a print in hand. One valid
+    solid, plausible volume, unchanged bounding box and `hollow_failed` False throughout.
+
+    Pinned by RAY PARITY rather than by volume. A volume assertion cannot tell a slab from a
+    thicker roof: at wall 14 the slab is 4,608mm3 of 184,704, well inside anything a tolerance
+    would allow. The distinguishing fact is that a ray up the middle crosses material ONCE."""
+    import cadquery as cq
+    block = _block_with([])                       # 100 long, 40 tall, 60 wide
+    block["hullHollow"] = True
+
+    for wall in (5.0, 13.0, 13.4, 14.0, 16.0, 18.0):
+        report = {}
+        solid = hull.build_solid(dict(block, wallThickness=wall, openUnderside=True),
+                                 report=report).val()
+        runs, inside, start = [], False, None
+        for i in range(0, 4001):                   # 0.01mm steps, the full height
+            z = i * 0.01
+            here = solid.isInside(cq.Vector(50.0, 0.0, z), 1e-6)
+            if here and not inside:
+                start = z
+            if inside and not here:
+                runs.append((round(start, 2), round(z, 2)))
+            inside = here
+        if inside:
+            runs.append((round(start, 2), 40.0))
+
+        assert solid.isValid() and len(solid.Solids()) == 1, f"wall {wall}: not one valid solid"
+        assert len(runs) == 1, (
+            f"wall {wall}mm: a ray up the middle crosses material {len(runs)} times — {runs}. "
+            f"With the underside open there is only the roof above the cavity; a second run "
+            f"with air on both sides of it is a floating slab.")
+        assert runs[0][1] == pytest.approx(40.0, abs=0.05), (
+            f"wall {wall}: the one run has to be the roof, reaching the top — got {runs[0]}")
