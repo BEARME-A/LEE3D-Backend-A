@@ -379,18 +379,38 @@ async def import_pdf_detail(file: UploadFile = File(...), page: int = Form(0),
     raw = await file.read()
     try:
         sheet = read_sheet(raw, page_index=page)
-        segs = [d for d in sheet["details"] if d.get("frame")]
-        # A PAGE WITH NO TITLED FRAME IS NOT A DETAILS SHEET. Measured: L201B and L400 each
+        # ONE LIST, ONE INDEX — and this is the list `/import/pdf/sheet` publishes.
+        #
+        # This used to index `[d for d in sheet["details"] if d.get("frame")]`, a FILTERED copy.
+        # `read_sheet` attaches a frame to each listed detail but keeps the ones it could not
+        # place, so the moment a single detail lands in no frame every index after it shifts by
+        # one and the crop returns somebody else's drawing — the exact fault this project
+        # already fixed once between these two endpoints, reintroduced by the fix for it.
+        # Reproduced on a built two-detail sheet at rotation 0 and 270: the listing showed
+        # WAYFINDING SIGN at index 0 and the crop handed back MAIN COLUMN FRONT ELEVATION,
+        # while index 1 — the detail that IS croppable — 404'd as "detail 1 of 1".
+        #
+        # So index `sheet["details"]` itself, and say which of the two things went wrong.
+        details = sheet["details"]
+        # A PAGE WITH NO TITLED DETAIL IS NOT A DETAILS SHEET. Measured: L201B and L400 each
         # yield two frames — the 725 x 951.8mm sheet border and a 61mm seal box — which do not
         # contain one another, so neither is dropped by containment and both survive as
         # untitled. Handing back a whole site plan as "detail 0" would be worse than a 404.
-        # The titled-frame test is what separates them: real details sheets title nearly all of
+        # The titled test is what separates them: real details sheets title nearly all of
         # theirs (9 of 10 on L406, 10 of 11 on L405, 10 of 13 on L404).
-        if not segs:
+        if not details:
             raise HTTPException(404, "this page has no titled details — it is a plan or a schedule")
-        if detail < 0 or detail >= len(segs):
-            raise HTTPException(404, f"detail {detail} of {len(segs)} on this page")
-        seg = segs[detail]
+        if detail < 0 or detail >= len(details):
+            raise HTTPException(404, f"detail {detail} of {len(details)} on this page")
+        seg = details[detail]
+        # A DETAIL THE SHEET NEVER BOXED CANNOT BE CROPPED, and that is its own answer rather
+        # than the next detail's picture. Returning a neighbour here is worse than a 404: the
+        # title and scale would come back consistent with the image and nothing downstream
+        # could tell it was the wrong drawing.
+        if not seg.get("frame"):
+            raise HTTPException(
+                404, f"{seg.get('title') or 'that detail'} is not boxed on this sheet, "
+                     f"so there is no frame to crop — trace the page as an image instead")
         img = render_detail(raw, page, seg["frame"], dpi=dpi)
         return {"title": seg["title"], "scale": seg["scale"],
                 "png_base64": base64.b64encode(img["png"]).decode("ascii"),
