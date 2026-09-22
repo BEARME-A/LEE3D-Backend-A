@@ -6,10 +6,18 @@ return it split into an UPPER chain (roofline) and a LOWER chain (sill), already
 shaped like the frontend's topProfile / bottomProfile (x in 0..1, value in px).
 
 Honest scope: this *suggests* an outline to trace against. It does not read
-dimension annotations off the page — the user still sets scale in the UI (two
-clicks + a known length). Auto-reading hand-drawn dimensions reliably is a
-research problem, not a checkbox, and pretending otherwise would waste the
-friend's filament on wrong-sized parts.
+dimension annotations off the page — for an IMAGE the user still sets scale in
+the UI (two clicks + a known length). Auto-reading hand-drawn dimensions
+reliably is a research problem, not a checkbox, and pretending otherwise would
+waste the friend's filament on wrong-sized parts.
+
+THAT IS TRUE OF A PHOTO AND NO LONGER TRUE OF THE APP. `app/pdf_import.py`
+reads the scale, the dimensions, the sheet number and the survey schedule
+straight off a vector PDF, because a plotted drawing carries them as placed
+text with coordinates. Collin's rule is `manual input for PICTURES, never for
+information`, and this module is the PICTURES half. Anyone arriving here
+looking for why a drawing has to be measured by hand wants that file, not this
+one — the sentence above used to read as if it applied to both.
 """
 from __future__ import annotations
 from typing import Dict, List
