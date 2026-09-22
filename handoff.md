@@ -67,7 +67,7 @@ and a step fails the build if the schema contract or the studio-vs-backend tests
 ever see those two skip locally, the sibling layout above is wrong; that is the whole of it.
 
     wrong setup    98 passed,  20 skipped
-    right setup   124 passed,   1 skipped, 1 deselected
+    right setup   125 passed,   1 skipped, 1 deselected
 
 The one legitimate skip is a clean-error path that can only be exercised *without* OpenCascade.
 
@@ -265,6 +265,14 @@ These are distilled from `STATUS.md`. Every one cost a session.
   `escapeHTML()` were all invented in drafts. There is now a test asserting every helper the
   import path calls is defined — use it.
 - Untrusted strings go in with `textContent`. This app never builds HTML around them.
+
+**The backend holds a write token. Treat every string that reaches a path as hostile.**
+- `library_path` decides where `commit_file` writes in LEE3D-Lib, and both its callers take
+  their values from an unauthenticated request. It sanitised nothing until 2026-09-21.
+- Rebuild a path segment, never check one. A blocklist has to anticipate every separator;
+  keeping only `[A-Za-z0-9._-]` and taking the last component cannot be talked round.
+- Assert on the RESOLVED URL. httpx collapses `..` before the request leaves, so a path that
+  looks odd and a path that looks clean can go to the same place.
 
 ---
 
