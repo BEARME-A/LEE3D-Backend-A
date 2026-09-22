@@ -752,6 +752,23 @@ see the app, click anything, or judge how something reads. Everything below is v
 far as code and numbers go, and unverified as far as a person using it goes. Tick items off
 and delete them once confirmed._
 
+**0e. A SHORT, THICK-WALLED PART WITH THE UNDERSIDE OPEN.** (added 2026-09-21)
+   - The exact build used to leave a floating slab whenever the floor was thicker than the
+     cavity — `3*wall > height` uniform, `2*bottom + top > height` per face. Fixed and pinned by
+     a ray-parity test at walls 5 through 19.9 on a 40mm block.
+   - **What needs your eyes:** one such part on screen, or printed. Everything above is a ray
+     through a solid, not a look at one. Anything short and thick-walled is the case — a
+     bracket, a base, one of Curtis's pieces. If a floor is still there, say so and do not let
+     me chase it from fixtures again.
+
+**0d. A PDF WHOSE DETAILS ARE NOT ALL BOXED.** (added 2026-09-21)
+   - `/import/pdf/detail` used to hand back the NEXT detail's drawing when one on the sheet had
+     no frame, with a title and scale that agreed with the wrong picture. It now refuses by
+     name.
+   - **What needs your eyes:** drop a real sheet and see that the refusal reads sensibly in the
+     picker — and that the picker still lists what it should. The index arithmetic is tested at
+     both rotations; how it READS is not something I can check.
+
 **0c. Worth a glance in Workshop at your car with its bottom plate — if it sits half a length
 off, that's the thing I couldn't test.** (added 2026-08-30, at Collin's request)
    - `makeBottom` lays the plate at `x=(xf-0.5)*L`, so -L/2..L/2. The projection body measures
@@ -1752,6 +1769,64 @@ including the plank work, which is fine, but a field-vs-stamp comparison that do
 
    Both matter because the volume in the studio header is what someone estimates filament from,
    and neither number is currently the thing that gets printed.
+
+======================================================================
+## HOUSEKEEPING WITH TEETH — 2026-09-21. Three silent traps, none of them geometry.
+======================================================================
+
+### A DEPLOY CAN SHIP AN UNWIRED STUDIO AND REPORT SUCCESS
+`deploy.yml` copies index.html into `_site/` and substitutes four literal strings —
+`__SUPABASE_URL__`, `__SUPABASE_ANON_KEY__`, `__BACKEND_URL__`, `__LIB_REPO__` — from repo
+secrets and variables. **Nothing pinned those names on the studio's side.** Rename one in
+index.html and the replacement finds nothing and leaves the placeholder in, while the
+workflow's own log still prints `wired: BACKEND_URL` — because it reports which ENV VARS were
+set, not which replacements landed.
+
+The app then comes up with `backendUrl` literally equal to `"__BACKEND_URL__"`, which fails
+exactly the way unset does: "anything you leave unset simply stays switched off". A live site
+with no backend and no cloud saves, deployed green, found by whoever next presses Build exact.
+
+All four are present and correct today. There is now a test asserting each appears **exactly
+once** — twice is as bad as none, since one copy would go unsubstituted in some builds and
+neither end would say so. Mutation-checked by renaming one.
+
+### A TEST THAT RELOADED TWO MODULES AND LEFT THEM RELOADED
+`tests/test_storage.py` set `LEE3D_DATA_DIR` to a temp dir and reloaded `app.config` and
+`app.storage` to pick it up. It never put either back. A reload rebinds the module GLOBALLY for
+every test after it, pointing at a directory this one abandons, and the env var stayed set for
+the rest of the process.
+
+**It was harmless only because pytest collects alphabetically and that file sorts last.** That
+is a property of the FILE NAMES. `tests/test_vision.py` would sort after it; `-p randomly`
+removes the guarantee outright. And `app.main` already holds a reference to the pre-reload
+`storage` module, so after the reload two module objects are live at once — the
+two-copies-of-one-thing shape this file keeps recording, this time in the test suite.
+
+Now saved and restored in a `finally`, with a second test that runs the roundtrip and then
+checks the process was left as it was found. Mutation-checked: drop the `finally` and the guard
+fails.
+
+### NEITHER REPO HAD A `.gitignore`. THE SUITE WRITES INTO ONE OF THEM.
+`config.DATA_DIR` defaults to `./data`, so every local `pytest` leaves `data/lee3d.db` and
+`data/generated/` in the backend repo root, next to `__pycache__` and `.pytest_cache`. Nothing
+has been committed yet. One `git add -A` puts a SQLite cache and a pile of bytecode into the
+repo that is the authority on what the backend is.
+
+The frontend's gap is narrower and sharper: **`_site/`**. `deploy.yml` stages index.html there
+and substitutes the real Supabase and backend strings into the copy. A committed `_site/` would
+be a second studio in the repo carrying live connection strings — and the suite already warns
+about a second copy of the studio, for a related reason.
+
+Added to both. Nothing in either list is anything but a cache or an output.
+
+### `app/vision.py` SAID SCALE STILL HAS TO BE TYPED IN
+Its docstring: "It does not read dimension annotations off the page — the user still sets scale
+in the UI". True of a PHOTO, which is all that module handles, and false of the app since
+`pdf_import.py` started reading the scale, the dimensions, the sheet number and the survey
+schedule off a vector sheet. Collin's rule is `manual input for PICTURES, never for
+information`, and this module is the pictures half — the sentence now says so instead of
+reading as if it covered both. Same family as the conda claim: a true statement that stopped
+being the whole truth and sends the next reader the wrong way.
 
 ======================================================================
 ## THE BACKEND'S OWN CI HAS NEVER RUN THE DIVERGENCE GUARDS — fixed 2026-09-21
@@ -4061,10 +4136,12 @@ than admitting they are unknown._
 Shipped: **index.html 2ec42560**, **test/core.test.mjs da8bf2ac**, **app/hull.py 8d7a6e0d**,
 **app/main.py 91536f59**, **app/pdf_import.py 70a44f01**, **tests/test_hull.py f64df4f3**,
 **tests/test_pdf_geometry.py e1fc7cb5**, **.github/workflows/ci.yml**, **README.md**,
-**environment.yml**, and **LEE3D-Frontend/ARCHITECTURE.md**.
+**environment.yml**, **app/vision.py**, **tests/test_storage.py**, **.gitignore** (new, both
+repos), and **LEE3D-Frontend/ARCHITECTURE.md**.
 
-    backend        123 passed, 1 skipped, 1 deselected   (was 118/1/1 — five new tests)
-    frontend       289 of 289, seven slices summing exactly to t_calls
+    backend        124 passed, 1 skipped, 1 deselected
+    frontend       290 of 290 — 84+80+20+20+30+25+31, summing exactly to t_calls
+
     schema checker clean
 
 **FOCUS:** read the two ends against each other and measure the disagreements. No report
@@ -4114,6 +4191,16 @@ cavity. A sheet whose only detail is framed cannot show a filter dropping one. A
 middle of the page cannot show a clip being truncated at its edge. **The question to ask of a
 fixture is not "is this the right kind of object" but "does this one actually reach the
 branch".**
+
+**ALSO SHIPPED, the housekeeping that was not cosmetic**
+- **Nothing pinned the four deploy placeholders**, so a rename on the studio's side would ship a
+  live site with no backend and no cloud saves, reported green. Now tested, exactly-once.
+- **`tests/test_storage.py` reloaded `app.config` and `app.storage` and left them reloaded**,
+  which is safe only because that filename sorts last. Restored in a `finally`, with a guard.
+- **Neither repo had a `.gitignore`**, and the suite writes `data/` into the backend root on
+  every run. The frontend's real exposure is `_site/` — a staged studio carrying the real
+  Supabase and backend strings.
+- **`app/vision.py` claimed scale still has to be typed in.** True of a photo, false of the app.
 
 **ALSO SHIPPED, all documentation and all of it actively wrong**
 - `ci.yml`, `README.md` and `ARCHITECTURE.md` each still said cadquery was not pip-reliable and
