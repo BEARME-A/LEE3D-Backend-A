@@ -1754,6 +1754,106 @@ including the plank work, which is fine, but a field-vs-stamp comparison that do
    and neither number is currently the thing that gets printed.
 
 ======================================================================
+## THE BACKEND'S OWN CI HAS NEVER RUN THE DIVERGENCE GUARDS — fixed 2026-09-21
+======================================================================
+_Found by reading `ci.yml` against `schema.yml`. The Lib workflow checks out all three repos
+because "no single repo can tell whether the other end reads a key". The BACKEND workflow
+checks out one._
+
+### MEASURED, by running this repo alone in an empty directory — which is what CI does
+
+    114 passed, 10 skipped, 1 deselected
+
+and the ten, with their own stated reasons:
+
+    test_schema_contract.py  x4   profile.schema.json not found — check out LEE3D-Lib beside this repo
+    test_hull.py  :493 :528       no traced car available — check out LEE3D-Lib beside this repo
+    test_hull.py  :779 :868       LEE3D-Frontend is not checked out beside this repo
+    test_pdf_geometry.py :379     LEE3D-Lib not checked out beside this repo
+    test_hull.py  :160            the clean-error path needs the kernel ABSENT   <- the only real one
+
+**Every artefact this project built to catch the two ends disagreeing is in that list.** The
+schema contract — the thing written to catch all four of the divergence bugs by EXECUTION
+rather than by grep. Both real-traced-car hollow tests, written precisely because "a six-faced
+block shells fine and every existing test passed while this was broken". Both studio-vs-backend
+tests, which read `index.html` and pin `normPoly` against `_clean` and the whole unclipped-cavity
+fix. None of them has ever run on a push.
+
+**And CI reported "114 passed" the entire time.** This is the container-reset finding of
+2026-08-30 — "nineteen of the twenty skips were environment gaps, and a skip reads as a pass" —
+except it was never a container problem. It was the workflow, on every push, for months. That
+turn fixed the symptom in the container and left the cause in the repo.
+
+### THE FIX, and it is two parts because one of them is the part that lasts
+1. **Both jobs check out all three repos**, into sibling paths, the way `schema.yml` already
+   does. No `continue-on-error` on the siblings, deliberately, and that differs from
+   `schema.yml` on purpose: there a skipped checkout still leaves the checker validating every
+   profile, so the step is never a no-op; here a missing sibling turns nine real tests into
+   skips and the job still goes green.
+2. **A step that asserts the guards RAN.** A checkout that succeeds and lands in the wrong place
+   looks identical from the job's point of view, and the failure being guarded against is one
+   that reports green — so the assertion is on the RESULT:
+
+       pytest -q -rs tests/test_schema_contract.py   must report no skips
+       pytest -q -rs tests/test_hull.py -k studio    must report no skips
+
+   Neither file has a legitimate skip: the contract needs only the library, and the two studio
+   tests read `index.html` and are NOT kernel-gated, so both run in the fast job and the cad job
+   alike. Rehearsed both ways before shipping — 5 passed / 6 passed with the siblings present,
+   and `1 passed, 4 skipped` / `4 passed, 2 skipped` in exactly the state CI was in, which is
+   the mutation test for this.
+
+**Also: `pillow` is now installed in CI.** `test_a_crop_covers_its_frame_at_either_rotation`
+does `pytest.importorskip("PIL.Image")` for its content check — the half that catches a crop
+landing on blank paper, which a size check cannot see, and the half that finally caught the
+304.8mm y-flip. It has been skipping in CI since it was written. It is a TEST dependency, so it
+goes on the install line and not in `requirements.txt`.
+
+### "CADQUERY IS NOT PIP-RELIABLE" IS STILL IN THREE FILES — two of them fixed here
+That sentence is the single most expensive line in this project: it is why the kernel tests were
+left to "run locally" and in fact ran nowhere, while the exact build's geometry went unchecked
+for months. `requirements.txt` was corrected on 2026-08-23. The other copies were not:
+
+    .github/workflows/ci.yml   "The CAD path is exercised locally via environment.yml (conda)"
+                               — in the HEADER, forty lines above the `cad` job whose own comment
+                               refutes it. Fixed.
+    README.md                  "CadQuery needs OpenCascade, which is **not** reliable via pip.
+                               Use conda" — the FIRST thing a new contributor reads. Fixed.
+    ARCHITECTURE.md            same instruction in the frontend repo. Fixed.
+
+**And `environment.yml` pins cadquery 2.4, which is older than what CI tests.** A local conda
+build is therefore a different OpenCascade from the one every number in this file was measured
+on — the same shape as every other divergence here, one layer down in the toolchain. Left
+pinned, because raising it means a conda solve nobody has verified, but the file now says so in
+its own header rather than calling itself "the supported way".
+
+### TWO MORE INSTRUCTIONS THAT ARE KNOWN TO FAIL, both in ARCHITECTURE.md
+- **"Settings -> Pages -> Deploy from branch -> main /(root)".** That setting is what makes
+  `deploy.yml` queue forever: GitHub's own pages-build-deployment takes ownership of the site.
+  This document has said "Source: GitHub Actions, NOT Deploy from a branch" for weeks, and the
+  architecture doc told the other story. Corrected.
+- **`docker build -t lee3d .`** — this repo has never contained a plain `./Dockerfile`; the
+  images are `Dockerfile.light` and `Dockerfile.full`. The identical wrong path in `render.yaml`
+  broke a Blueprint deploy once already, and its comment says so. Corrected to name both files.
+
+### AUDITED AND SOUND, so nobody re-checks
+- `projects/example-charger/manifest.json` validates against `manifest.schema.json`.
+- The Lib profile glob is `*.json` with the schemas filtered out, so all five real profiles are
+  validated and `NewCar.stl` is not mistaken for one.
+- The frontend's `ci.yml` and `deploy.yml` both run the core suite as a gate, unchanged.
+- `nextjs/github-pages.yml` sits OUTSIDE `.github/workflows`, so GitHub never reads it, and its
+  own header says it is a copy-me template and not to run it alongside the root deploy. Inert
+  and documented — not a second deploy path.
+
+### ONE FILE THAT IS IN THE WRONG PLACE, and it is Collin's call
+`LEE3D-Lib/schema/NewCar.stl` — 832KB of binary mesh in a folder named `schema`, referenced by
+no code, no test, no workflow and no README in any of the three repos. It is a build OUTPUT
+checked into a contract directory. Nothing breaks either way; the glob only looks at `*.json`.
+Recommended for deletion on the same reasoning that retired `LEE3D-Lib/app/schemas.py` — but
+that one was deleted by Collin after being recommended, not by me, and this follows the same
+rule.
+
+======================================================================
 ## FOUR BUGS FROM AN AUDIT — 2026-09-21. Two of them silent, one in the exported part.
 ======================================================================
 _No report prompted these. All four came out of reading the two ends against each other and
@@ -3960,7 +4060,8 @@ than admitting they are unknown._
 ----------------------------------------------------------------------
 Shipped: **index.html 2ec42560**, **test/core.test.mjs da8bf2ac**, **app/hull.py 8d7a6e0d**,
 **app/main.py 91536f59**, **app/pdf_import.py 70a44f01**, **tests/test_hull.py f64df4f3**,
-**tests/test_pdf_geometry.py e1fc7cb5**.
+**tests/test_pdf_geometry.py e1fc7cb5**, **.github/workflows/ci.yml**, **README.md**,
+**environment.yml**, and **LEE3D-Frontend/ARCHITECTURE.md**.
 
     backend        123 passed, 1 skipped, 1 deselected   (was 118/1/1 — five new tests)
     frontend       289 of 289, seven slices summing exactly to t_calls
@@ -3968,6 +4069,12 @@ Shipped: **index.html 2ec42560**, **test/core.test.mjs da8bf2ac**, **app/hull.py
 
 **FOCUS:** read the two ends against each other and measure the disagreements. No report
 prompted any of this.
+
+**THE BIGGEST FINDING IS NOT A BUG IN THE CODE.** `ci.yml` checked out one repo, so the schema
+contract, both traced-car hollow tests and both studio-vs-backend tests have been SKIPPING on
+every push — `114 passed, 10 skipped`, reported as green. The 2026-08-30 entry about nineteen
+environment skips fixed that in the container and left the cause in the workflow. Both jobs now
+check out all three repos and a step asserts the guards actually ran. Full section above.
 
 **THE MANIFEST AUDIT CAME BACK CLEAN** — all seventeen files match, which is the first time in
 this document that section has not found something. The environment numbers reproduce too:
@@ -4007,6 +4114,16 @@ cavity. A sheet whose only detail is framed cannot show a filter dropping one. A
 middle of the page cannot show a clip being truncated at its edge. **The question to ask of a
 fixture is not "is this the right kind of object" but "does this one actually reach the
 branch".**
+
+**ALSO SHIPPED, all documentation and all of it actively wrong**
+- `ci.yml`, `README.md` and `ARCHITECTURE.md` each still said cadquery was not pip-reliable and
+  sent the reader to conda — the exact sentence that kept the kernel tests from running. It was
+  corrected in `requirements.txt` months ago and in nowhere else.
+- `ARCHITECTURE.md` told you to set Pages to "Deploy from a branch", which makes `deploy.yml`
+  queue forever, and to run `docker build -t lee3d .` against a `Dockerfile` this repo has never
+  had — the same wrong path that broke a Blueprint deploy once.
+- `environment.yml` called itself "the supported way" while pinning a kernel older than the one
+  CI tests. It now says which it is.
 
 **OPEN**
 - `test_cad.py::test_generate_stl_full_resolution` still has not run against the lathe changes.
