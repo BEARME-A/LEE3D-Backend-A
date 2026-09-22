@@ -37,6 +37,7 @@ the bugs in `STATUS.md` are one end quietly building something different from th
     LEE3D-Backend-A/tests/test_cad.py              a5d53a3e
     LEE3D-Backend-A/conftest.py                    75d923b5   (repo ROOT, not app/)
     LEE3D-Backend-A/requirements.txt               62d4dba6
+    LEE3D-Backend-A/.github/workflows/ci.yml       (rewritten 2026-09-21 — see STATUS)
     LEE3D-Lib/schema/profile.schema.json           a22798fa
     LEE3D-Lib/schema/sheet.schema.json             1cc234fa
     LEE3D-Lib/tools/check_schema_coverage.py       32e2bae1
@@ -59,6 +60,11 @@ The zips extract as `LEE3D-Lib-main`; the tests look for `LEE3D-Lib` **beside** 
 **Without both, nineteen tests skip and a skip reads as a pass in the summary line.** A
 previous session shipped schema changes for several turns with the schema contract tests
 silently skipping and reported "98 passed" the whole time.
+
+**And until 2026-09-21 the repo's own `ci.yml` had the same gap** — it checked out one repo, so
+ten tests skipped on every push and CI reported `114 passed`. Both jobs now check out all three
+and a step fails the build if the schema contract or the studio-vs-backend tests skip. If you
+ever see those two skip locally, the sibling layout above is wrong; that is the whole of it.
 
     wrong setup    98 passed,  20 skipped
     right setup   123 passed,   1 skipped, 1 deselected
@@ -242,7 +248,15 @@ These are distilled from `STATUS.md`. Every one cost a session.
 **Ship whole.**
 - When two files must change together, ship them together. A feature and its test are one
   change; twice a pair half-landed and left live code unguarded for turns.
-- Never ship a no-op behind a comment claiming a fix. One was reverted for exactly this.
+- Never ship a no-op behind a comment claiming a fix. One was reverted for exactly this, and
+  `build_lathe` carried another for months: `inner.translate((0, 0, -drop * 0.0))`.
+- **A fix applied in the container is not applied in the repo.** The nineteen-skips finding was
+  fixed by making symlinks and left unfixed in `ci.yml`, where it went on happening on every
+  push. When an environment problem bites, ask which of CI, the repo and the container it
+  actually lives in.
+- **A stale instruction is worse than a missing one.** "cadquery is not pip-reliable" was
+  corrected in one of four files and cost this project months of unchecked geometry from the
+  other three. When a claim is corrected, grep for it.
 - A segmentation or an answer that is *roughly* right is worse than none when nothing
   downstream can detect the difference.
 
