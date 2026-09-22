@@ -1771,6 +1771,69 @@ including the plank work, which is fine, but a field-vs-stamp comparison that do
    and neither number is currently the thing that gets printed.
 
 ======================================================================
+## THE LIBRARY PATH WAS NOT SANITISED — anyone could write into LEE3D-Lib. Fixed 2026-09-21.
+======================================================================
+_The most serious thing in this audit, and it is not geometry. Found by reading `storage.py`,
+which no session had opened._
+
+### WHAT IT WAS
+    def library_path(kind, project, filename):
+        folder = LIB_FOLDERS.get(kind, "generated")
+        safe_project = project.strip().replace(" ", "-") or "misc"
+        return f"{folder}/{safe_project}/{filename}"
+
+`safe_project` removed spaces. It did not remove `/` or `..`, and `filename` was not touched at
+all. The result is handed straight to the GitHub Contents API as a URL path, signed with the
+fine-grained PAT that has **Contents: read+write on LEE3D-Lib**. And httpx resolves `..`
+segments before the request leaves. Measured, not reasoned:
+
+    project="../.github/workflows"  filename="x.yml"
+      path -> drawings/../.github/workflows/x.yml
+      URL  -> /repos/OWNER/REPO/contents/.github/workflows/x.yml
+
+    project="misc"  filename="../../.github/workflows/x.yml"      same destination
+    project="a/b/c" filename="d.png"                              writes a tree, not a file
+
+### WHY IT MATTERS MORE THAN IT LOOKS
+- **Both commit sites go through it, and both take their values from an unauthenticated
+  request.** `/import/image` reads `project` from a form field and the name from the upload;
+  `/generate` uses `profile.name`.
+- **CORS does not stop this.** `LEE3D_CORS_ORIGINS` is a browser policy. The Render URL answers
+  curl like any other, and the token lives there precisely so it need not be handed out.
+- **A file in `.github/workflows/` is arbitrary code in that repo's Actions** — and LEE3D-Lib's
+  own `schema.yml` already checks out the other two repos.
+- It has been live for as long as the token has. **Nothing was exploited and there is nothing to
+  clean up**; this is a hole that existed, not an incident.
+
+### THE FIX: REBUILD EVERY SEGMENT, DO NOT CHECK IT
+A blocklist has to anticipate every way of writing a separator, and the interesting ones are
+the ones nobody thinks of — a backslash, a doubled slash, a name that is nothing but dots.
+`_one_segment` keeps only `[A-Za-z0-9._-]`, takes the LAST component, and strips leading and
+trailing dots and dashes. There is no input for which it returns something containing a
+separator, so there is nothing to talk it round. A final guard refuses outright if the result
+is ever not three plain segments under a known folder.
+
+    "../.github/workflows" / "x.yml"          -> drawings/workflows/x.yml
+    "misc" / "../../.github/workflows/x.yml"  -> drawings/misc/x.yml
+    ".." / ".."                               -> drawings/misc/file
+    "1968 charger" / "side.png"               -> drawings/1968-charger/side.png   unchanged
+
+The ordinary case is byte-identical to before — this is a rebuild, not a rejection, so no
+existing library path moves.
+
+### THE TEST ASSERTS THE RESOLVED URL, NOT THE STRING
+A path can contain `..` and be harmless, and can look clean and still resolve away. The only
+question that matters is where the request actually goes, so the test builds the same
+`httpx.URL` the client will and compares that against the path it was given. Eight hostile
+inputs plus the two ordinary ones.
+
+**MUTATION-CHECKED, AND THE FIRST ATTEMPT AT THAT PROVED NOTHING.** My mutation script threw
+before it wrote, and the suite came back green — which reads exactly like "the old code passes
+too". The second attempt asserted the file's CONTENT had changed before running anything.
+**A mutation that did not apply is a green run that means nothing**, which is this file's own
+"identical output means the code path did not run" rule pointed at the test harness.
+
+======================================================================
 ## HOUSEKEEPING WITH TEETH — 2026-09-21. Three silent traps, none of them geometry.
 ======================================================================
 
@@ -1807,6 +1870,10 @@ checks the process was left as it was found. Mutation-checked: drop the `finally
 fails.
 
 ### NEITHER REPO HAD A `.gitignore`. THE SUITE WRITES INTO ONE OF THEM.
+**NOT SHIPPED — GitHub's mobile flow would not create a dotfile, so as of 2026-09-21 neither
+repo has one and the risk below is still live.** Do not assume they landed. On a desktop
+browser the pre-filled form works: `github.com/BEARME-A/<repo>/new/main?filename=.gitignore`.
+The two files were written and are in that session's outputs.
 `config.DATA_DIR` defaults to `./data`, so every local `pytest` leaves `data/lee3d.db` and
 `data/generated/` in the backend repo root, next to `__pycache__` and `.pytest_cache`. Nothing
 has been committed yet. One `git add -A` puts a SQLite cache and a pile of bytecode into the
@@ -4136,10 +4203,11 @@ than admitting they are unknown._
 Shipped: **index.html 2ec42560**, **test/core.test.mjs da8bf2ac**, **app/hull.py 8d7a6e0d**,
 **app/main.py 91536f59**, **app/pdf_import.py 70a44f01**, **tests/test_hull.py f64df4f3**,
 **tests/test_pdf_geometry.py e1fc7cb5**, **.github/workflows/ci.yml**, **README.md**,
-**environment.yml**, **app/vision.py**, **tests/test_storage.py**, **.gitignore** (new, both
-repos), and **LEE3D-Frontend/ARCHITECTURE.md**.
+**environment.yml**, **app/vision.py**, **app/storage.py**, **tests/test_storage.py**, and
+**LEE3D-Frontend/ARCHITECTURE.md**. (`.gitignore` for both repos was written and could not be
+committed from mobile — still outstanding.)
 
-    backend        124 passed, 1 skipped, 1 deselected
+    backend        125 passed, 1 skipped, 1 deselected
     frontend       290 of 290 — 84+80+20+20+30+25+31, summing exactly to t_calls
 
     schema checker clean
@@ -4173,7 +4241,12 @@ this document that section has not found something. The environment numbers repr
   rewritten plan-sheet test. Frontend: four mutants, all three new tests red, and the source
   half of the title test re-checked on its own so the behavioural half could not mask it.
 
-**WHAT FAILED, and both were mine**
+**WHAT FAILED, and all three were mine**
+- **A mutation that did not apply came back green.** The script threw before writing and the
+  suite passed, which reads exactly like "the old code passes this test too". Caught only
+  because the exception was visible. Every mutation since asserts the file's CONTENT changed
+  before running anything — and that is the same rule this file already states about no-op
+  edits, aimed at the harness instead of the product.
 - **My comment tripped the ghost check.** Explaining why the new helper is not named
   `escapeHTML` put that string in the file, and the suite greps the whole file for it. The check
   was right; the comment was wrong. Same fact as the absence-test trap already in here, from the
@@ -4192,6 +4265,11 @@ middle of the page cannot show a clip being truncated at its edge. **The questio
 fixture is not "is this the right kind of object" but "does this one actually reach the
 branch".**
 
+**THE ONE THAT MATTERS MOST IS NOT GEOMETRY.** `library_path` did not sanitise anything, so an
+unauthenticated POST could make the backend commit into `.github/workflows/` of LEE3D-Lib using
+its write token. Measured end to end, fixed at the single choke point both call sites use, and
+pinned by a test that asserts the RESOLVED URL. Full section above.
+
 **ALSO SHIPPED, the housekeeping that was not cosmetic**
 - **Nothing pinned the four deploy placeholders**, so a rename on the studio's side would ship a
   live site with no backend and no cloud saves, reported green. Now tested, exactly-once.
@@ -4199,7 +4277,8 @@ branch".**
   which is safe only because that filename sorts last. Restored in a `finally`, with a guard.
 - **Neither repo had a `.gitignore`**, and the suite writes `data/` into the backend root on
   every run. The frontend's real exposure is `_site/` — a staged studio carrying the real
-  Supabase and backend strings.
+  Supabase and backend strings. **These two did NOT ship**: GitHub's mobile flow would not
+  create a dotfile. Still outstanding.
 - **`app/vision.py` claimed scale still has to be typed in.** True of a photo, false of the app.
 
 **ALSO SHIPPED, all documentation and all of it actively wrong**
