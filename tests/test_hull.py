@@ -1146,3 +1146,70 @@ def test_opening_the_underside_leaves_no_floating_slab_at_a_thick_wall():
             f"with air on both sides of it is a floating slab.")
         assert runs[0][1] == pytest.approx(40.0, abs=0.05), (
             f"wall {wall}: the one run has to be the roof, reaching the top — got {runs[0]}")
+
+
+def test_a_pocket_deeper_than_its_wall_is_reported_not_swallowed():
+    """THE STUDIO GOT THE FIX FOR THIS AND THIS END NEVER DID.
+
+    This build cuts a pocket out of the solid and builds the cavity from the outlines; the two
+    know nothing of each other, so a pocket deeper than the wall it sits on cuts clean into the
+    cavity and leaves a HOLE. The studio's field carve pushes the cavity down under a pocket
+    instead, keeping the wall beneath it — recorded in STATUS.md as Curtis's safety issue and
+    the reason that path is the default. So the preview shows a pocket and the STEP has a hole.
+
+    Measured on the real traced car at Collin's own settings, 153 pockets at 2.5mm into a 2.1mm
+    wall, control against pocketed, ray straight up through the kernel solid:
+
+        x=120   roof 86.9-88.9  ->  NOTHING        a hole through into the cavity
+        x=100   roof 85.9-88.2  ->  85.9-86.7      0.8mm of wall left
+
+    **No library fixture can reach it.** Their deepest pocket is 2.5mm against walls of 4.2 and
+    4.9mm, so every test in this file has run on a body where a pocket physically cannot break
+    through. That is why this one sets the wall BELOW the pocket depth rather than using a
+    fixture as saved — the eighth time in this project a fixture has been the reason something
+    real went unseen.
+
+    Reported, not resolved: pushing the cavity down the way the studio does is a real change to
+    how the cavity is built, and shipping the reporting first is exactly what made the failed
+    hollow findable instead of guessed at."""
+    deep = {"name": "roof panel", "view": "top", "depth": -5.0,
+            "poly": [[0.3, 0.3], [0.7, 0.3], [0.7, 0.7], [0.3, 0.7]]}
+    shallow = {"name": "badge", "view": "top", "depth": -1.0,
+               "poly": [[0.1, 0.1], [0.2, 0.1], [0.2, 0.2], [0.1, 0.2]]}
+
+    # a 5mm wall: the 5mm pocket reaches it exactly, the 1mm one does not
+    p = _block_with([deep, shallow])
+    p.update(hullHollow=True, wallThickness=5.0)
+    got = hull.plan(p)["pockets_through_wall"]
+    assert [g["name"] for g in got] == ["roof panel"], got
+    assert got[0]["wall"] == pytest.approx(5.0) and got[0]["depth"] == pytest.approx(-5.0)
+
+    # thicken the wall past the pocket and it stops being a problem — the report tracks the
+    # geometry rather than just counting deep features
+    p.update(wallThickness=8.0)
+    assert hull.plan(p)["pockets_through_wall"] == []
+
+    # PER FACE, and by the face the pocket is DRAWN ON. A thick roof protects a roof pocket and
+    # says nothing about a flank one; getting this backwards would report the wrong pockets and
+    # is the same sign trap the per-face cavity already has two tests for.
+    side = {"name": "vent", "view": "side", "depth": -5.0,
+            "poly": [[0.3, 0.3], [0.7, 0.3], [0.7, 0.7], [0.3, 0.7]]}
+    p = _block_with([deep, side])
+    p.update(hullHollow=True, wallThickness=5.0, wallTop=15.0, wallSide=3.0, wallBottom=5.0)
+    names = [g["name"] for g in hull.plan(p)["pockets_through_wall"]]
+    assert names == ["vent"], (
+        f"a 15mm roof swallows a 5mm roof pocket and a 3mm flank does not swallow a 5mm "
+        f"vent — got {names}")
+
+    # A SOLID BODY HAS NO CAVITY TO BREAK INTO, so there is nothing to report and a warning
+    # here would be crying wolf on every deeply-carved solid part.
+    p = _block_with([deep])
+    p.update(hullHollow=False, wallThickness=5.0)
+    assert hull.plan(p)["pockets_through_wall"] == []
+
+    # and a RAISE is not a pocket: it adds material and cannot open anything
+    up = {"name": "boss", "view": "top", "depth": 9.0,
+          "poly": [[0.3, 0.3], [0.7, 0.3], [0.7, 0.7], [0.3, 0.7]]}
+    p = _block_with([up])
+    p.update(hullHollow=True, wallThickness=5.0)
+    assert hull.plan(p)["pockets_through_wall"] == []
