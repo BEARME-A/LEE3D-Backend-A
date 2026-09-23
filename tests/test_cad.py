@@ -63,3 +63,62 @@ def test_generate_stl_full_resolution():
 
 if __name__ == "__main__":
     test_generate_stl_full_resolution()
+
+
+def _stl_extent(data: bytes):
+    """Triangle count and bounding-box extent of a binary STL, read straight out of the bytes."""
+    n = struct.unpack("<I", data[80:84])[0]
+    lo = [1e9] * 3
+    hi = [-1e9] * 3
+    off = 84
+    for _ in range(n):
+        for v in range(3):
+            pt = struct.unpack_from("<3f", data, off + 12 + v * 12)
+            for k, c in enumerate(pt):
+                lo[k] = min(lo[k], c)
+                hi[k] = max(hi[k], c)
+        off += 50
+    return n, [hi[k] - lo[k] for k in range(3)]
+
+
+def test_the_stl_envelope_does_not_move_with_resolution():
+    """THE INVARIANT THE FULL-RESOLUTION TEST CANNOT CHECK, because it runs one resolution.
+
+    `test_generate_stl_fast` proves the STL path is not broken outright; the full test guards
+    resolution-dependent failures but takes ~290s and has never run against the current
+    `hull.py` outside CI. Between them sits the thing this project actually protects: **the
+    outside of the part must not depend on how finely it was built.** This file has a whole
+    section on an auto-raise being removed because merely ticking `hollow` moved the outside by
+    half a millimetre, and another on a fix rejected for pulling the width in 0.6mm.
+
+    Two resolutions, both runnable here. Measured (after a discarded warmup — timing anything
+    on OpenCascade's first call reads 35s instead of 10):
+
+        stations 16 arc 12   1178 tris    9.6s   180.000 x 76.005 x 51.002
+        stations 24 arc 16   1372 tris   25.1s   180.000 x 76.004 x 51.001
+
+    They agree to 0.001mm on a 180mm body. The tolerance below is 0.01mm — ten times the
+    measured disagreement, and still four hundred times tighter than anything that would print
+    differently. Arc segmentation legitimately moves a curved surface by its chord height, so
+    this is checked on the ENVELOPE, where the extremes are set by the profiles rather than by
+    the arcs, and not on the triangle positions.
+    """
+    pytest.importorskip("cadquery", reason="needs OpenCascade")
+    from app.cad import generate_bytes
+    from app.schemas import GenerateOptions
+
+    coarse, _, _ = generate_bytes(_profile(stations=16, arc=12), GenerateOptions(fmt="stl"))
+    finer, _, _ = generate_bytes(_profile(stations=24, arc=16), GenerateOptions(fmt="stl"))
+    n_coarse, ext_coarse = _stl_extent(coarse)
+    n_finer, ext_finer = _stl_extent(finer)
+
+    assert n_finer > n_coarse, (
+        "a finer build must produce more triangles, or the resolution knob did nothing and "
+        "this test is comparing a body with itself")
+    for axis, a, b in zip("xyz", ext_coarse, ext_finer):
+        assert abs(a - b) <= 0.01, (
+            f"{axis} extent moved {abs(a - b):.4f}mm between stations 16/arc 12 and 24/16 "
+            f"({a:.4f} vs {b:.4f}). The outside of the part may not depend on how finely it "
+            f"was built — that is the invariant every hollowing change here is measured against.")
+    assert ext_coarse[0] == pytest.approx(180.0, abs=0.01), (
+        "and the length has to be the length that was asked for, not merely self-consistent")
