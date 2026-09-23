@@ -402,6 +402,40 @@ def plan(profile: Dict[str, Any]) -> Dict[str, Any]:
     raises = [f for f in feats if not f["through"] and f["depth"] > 0]
     # A feature with no depth is a mask or a text label: a surface effect with no solid meaning.
     surface = [f for f in feats if f["depth"] == 0.0]
+    # POCKETS THAT GO STRAIGHT THROUGH THE WALL OF A HOLLOW BODY.
+    #
+    # This build cuts a pocket out of the solid and builds the cavity from the outlines, so the
+    # two know nothing about each other: a pocket deeper than the wall it is drawn on cuts clean
+    # into the cavity and leaves a HOLE. The studio does not — its field carve pushes the cavity
+    # down under a pocket so the wall beneath keeps its thickness, which is recorded there as
+    # Curtis's safety issue and the reason that path is the default. **The studio got that fix
+    # and this end never did**, which is the shape of every divergence in STATUS.md: the studio
+    # moves, the exact build stands still, and nothing raises.
+    #
+    # Measured on the real traced car at Collin's own settings — 153 pockets at 2.5mm into a
+    # 2.1mm wall — control against pocketed, ray straight up:
+    #     x=120   roof 86.9-88.9 becomes NOTHING          a hole through into the cavity
+    #     x=100   roof 85.9-88.2 becomes 85.9-86.7        0.8mm of wall left
+    # None of the library fixtures can reach it: their deepest pocket is 2.5mm against walls of
+    # 4.2 and 4.9mm, so every test here has been run on a body where it cannot happen.
+    #
+    # REPORTED, NOT RESOLVED — deliberately, and in the same idiom as `unusable_views`,
+    # `surface_only` and `hollow_failed`. Pushing the cavity down the way the studio does is a
+    # real change to how the cavity is built, and shipping the reporting first is what made the
+    # failed hollow findable rather than guessed at. A caller can now say "these eleven pockets
+    # will break through into the cavity" instead of handing someone a part with holes in it.
+    through_wall = []
+    if _hollow_wanted(profile):
+        sp = wall_spec(profile)
+        # which face a view cuts, by the same convention `lift_normal` uses: roof and floor are
+        # their own faces, and a nose or tail counts as a flank rather than a fourth thing
+        FACE = {"top": "top", "bottom": "bot", "side": "side", "sideR": "side",
+                "front": "side", "rear": "side"}
+        for f in pockets:
+            w = sp.get(FACE.get(f.get("view"), "side"))
+            if w and abs(f["depth"]) >= abs(w):
+                through_wall.append({"view": f.get("view"), "depth": f["depth"], "wall": w,
+                                     "name": f.get("name")})
     # OUTLINES THIS BUILD CANNOT USE.
     # The studio can now carve from silhouettes at ANY angle (p.extraViews), which is the
     # groundwork for building from photographs — several views of an object, each one saying
@@ -455,6 +489,9 @@ def plan(profile: Dict[str, Any]) -> Dict[str, Any]:
         "pockets": pockets,
         "raises": raises,
         "surface_only": surface,      # masks and labels: genuinely nothing to build
+        # pockets drawn deeper than the wall they sit on: they will open into the cavity here,
+        # where the studio's field carve keeps the wall beneath them. See the note above.
+        "pockets_through_wall": through_wall,
         # HOLLOW COMES FROM hullHollow, WHICH IS THE FLAG THE STUDIO ACTUALLY SETS.
         # This used to read sepBottom, which means something else entirely — whether the
         # underside is a separate printed piece — and the studio sends that as true on every
