@@ -159,6 +159,12 @@ def solid(
             # the studio can carve from silhouettes at any angle; this build intersects the
             # three axis outlines only, so it would come out FATTER. Say so.
             "unusable_views": p["unusable_views"],
+            # Pockets drawn deeper than the wall they sit on. They cut into the cavity HERE and
+            # not in the preview, so a client that does not read this hands someone a part with
+            # holes where the screen showed pockets. Carries the view, the depth and the wall
+            # for each, because "eleven of your pockets" is not actionable and "the eleven on
+            # the roof, 2.5mm into a 2.1mm wall" is.
+            "pockets_through_wall": p["pockets_through_wall"],
             # SCALE. `dims` is the MODEL, which is what gets printed; these say what the model
             # stands for. Without them the scale a profile carries is computed here and thrown
             # away, and nothing downstream can tell a 120mm building at 1:200 from a 120mm one
@@ -208,6 +214,15 @@ def solid(
                  "X-LEE3D-Raises": str(len(p["raises"])),
                  "X-LEE3D-Skipped": str(len(p["surface_only"])),
                  "X-LEE3D-Unusable-Views": str(p["unusable_views"]),
+                 # HOW MANY POCKETS WILL OPEN INTO THE CAVITY. A pocket drawn deeper than the
+                 # wall it sits on cuts clean through here, because this build cuts pockets out
+                 # of the solid and builds the cavity from the outlines — the two know nothing
+                 # of each other. The studio's field carve pushes the cavity down instead and
+                 # keeps the wall, so the preview shows a pocket and the STEP has a hole.
+                 # Measured on the real traced car at a 2.1mm wall with 2.5mm pockets: a roof
+                 # of 86.9-88.9 becomes nothing at one station and 0.8mm at another.
+                 # Reported rather than resolved, like the headers above it.
+                 "X-LEE3D-Pockets-Through-Wall": str(len(p["pockets_through_wall"])),
                  # "1" only when a shell was ASKED FOR and the cavity could not be built, so
                  # this file is solid. "0" covers both "hollowed fine" and "never asked" —
                  # the studio only needs to warn about the one case where what it got is not
