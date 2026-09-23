@@ -75,17 +75,37 @@ jobs:
         working-directory: LEE3D-Backend-A
         # ASSERT THE RESULT, NOT THE CHECKOUT. A checkout that succeeds and lands in the wrong
         # place looks identical from up here, and the whole failure being guarded against is one
-        # that reports green. Neither of these files has a legitimate skip: the schema contract
-        # needs only the library, and the two studio tests read index.html and are not
-        # kernel-gated, so both run in this job and in the cad job alike.
+        # that reports green.
+        #
+        # THE TWO TESTS ARE NAMED BY NODE ID, NOT SELECTED WITH `-k studio`. The first version
+        # of this step used `-k studio`, which is a SUBSTRING match — it swept in four more
+        # tests than were meant, and one of them
+        # (`test_the_exact_body_is_levelled_the_same_way_the_studio_levels_it`) is kernel-gated.
+        # In this job cadquery is absent by design, so that one skips and the guard fired on a
+        # legitimate skip. Measured with cadquery genuinely removed:
+        #
+        #     pytest -q -rs tests/test_hull.py -k studio   ->  5 passed, 1 skipped, 49 deselected
+        #
+        # The `cad` job passed throughout because the kernel is installed there, which is
+        # exactly how it was reported: cad green, test red. I verified this guard with the
+        # kernel present and shipped it into the job that has none — the same one-environment
+        # mistake this whole file is a monument to.
+        #
+        # Naming the node ids also fails LOUDLY on a rename: pytest exits non-zero with "no
+        # tests ran" rather than quietly selecting nothing, which a `-k` pattern would do.
+        # Neither of these two is kernel-gated — they read index.html — so they run in both jobs.
         run: |
           set -o pipefail
           pytest -q -rs tests/test_schema_contract.py | tee /tmp/contract.txt
-          pytest -q -rs tests/test_hull.py -k studio  | tee /tmp/bothends.txt
+          pytest -q -rs \
+            "tests/test_hull.py::test_the_studio_rejects_a_zero_area_outline_the_same_way_this_end_does" \
+            "tests/test_hull.py::test_the_studio_draws_its_cavity_from_the_unclipped_body" \
+            | tee /tmp/bothends.txt
           if grep -qi skipped /tmp/contract.txt /tmp/bothends.txt; then
-            echo "::error::a sibling repo is missing or in the wrong place — the schema"
-            echo "::error::contract and the studio-vs-backend tests did not run. They skipped,"
-            echo "::error::and a skip is counted as a pass in the line above."
+            echo "::error::A sibling repo is missing or in the wrong place. The schema contract"
+            echo "::error::or the studio-vs-backend tests SKIPPED instead of running, and a skip"
+            echo "::error::is counted as a pass in the summary line above. Reasons:"
+            grep -i "^SKIPPED" /tmp/contract.txt /tmp/bothends.txt || true
             exit 1
           fi
 
