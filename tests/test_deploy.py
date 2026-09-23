@@ -267,3 +267,49 @@ def test_the_plan_reports_what_the_model_stands_for(monkeypatch):
     assert bad["scale_mismatch"] is not None, (
         "a real length 250x the model at a claimed 1:100 contradicts itself and must be said")
     assert bad["scale_mismatch"]["implied_length"] == pytest.approx(300.0)
+
+
+def test_the_endpoint_says_how_many_pockets_break_through_the_wall(monkeypatch):
+    """The header half, and deliberately in the FAST job for the same reason as the one above:
+    the geometry lives under the kernel, but the wiring from `plan()` to the wire must not be
+    able to rot unnoticed while OpenCascade is absent.
+
+    A pocket deeper than the wall it sits on cuts into the cavity HERE and not in the preview —
+    measured on the real traced car at a 2.1mm wall with 2.5mm pockets, a roof of 86.9-88.9
+    becomes nothing at one station. A client that cannot see this figure hands someone a part
+    with holes where the screen showed pockets."""
+    from fastapi.testclient import TestClient
+    from app import hull
+    from app.main import app
+
+    deep = {"name": "roof panel", "view": "top", "depth": -6.0,
+            "poly": [[0.3, 0.3], [0.7, 0.3], [0.7, 0.7], [0.3, 0.7]]}
+    prof = {
+        "name": "t", "length": 120.0,
+        "topProfile": [[0, 60]], "bottomProfile": [[0, 0]], "widthProfile": [[0, 25]],
+        "sidePoly": [[0, 0], [1, 0], [1, 1], [0, 1]],
+        "topPoly": [[0, 0], [1, 0], [1, 1], [0, 1]],
+        "frontPoly": [[0, 0], [1, 0], [1, 1], [0, 1]],
+        "hullHollow": True, "wallThickness": 4.0, "features": [deep],
+    }
+    def stub(profile, fmt="step", hollow=False, report=None):
+        return b"ISO-10303-21;", "application/step", "t.step"
+    monkeypatch.setattr(hull, "export_bytes", stub)
+    c = TestClient(app)
+
+    r = c.post("/solid", json=prof)
+    assert r.status_code == 200, r.text
+    assert r.headers.get("X-LEE3D-Pockets-Through-Wall") == "1", (
+        "a 6mm pocket in a 4mm wall opens into the cavity and the header has to say so, "
+        f"got {dict(r.headers)!r}")
+
+    # thicken the wall past the pocket and the same request must report none — a header that
+    # counted deep features rather than measuring them would not move here
+    r = c.post("/solid", json={**prof, "wallThickness": 9.0})
+    assert r.headers.get("X-LEE3D-Pockets-Through-Wall") == "0", dict(r.headers)
+
+    # and the plan carries WHICH ones, because "one pocket" is not actionable
+    r = c.post("/solid?plan_only=true", json=prof)
+    body = r.json()
+    assert [g["name"] for g in body["pockets_through_wall"]] == ["roof panel"], body
+    assert body["pockets_through_wall"][0]["wall"] == pytest.approx(4.0)
