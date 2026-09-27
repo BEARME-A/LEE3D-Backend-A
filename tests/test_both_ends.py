@@ -66,11 +66,17 @@ def _block(**kw):
 def _car(**kw):
     """The real traced car, **from LEE3D-Lib**, which is the copy bothends.mjs reads too.
 
-    Not this repo's or the frontend's nearest fixture: there are two copies of
-    `fixture-hollow.json`, one in LEE3D-Frontend/test and one in LEE3D-Lib/schema, and as of
-    2026-09-25 they have DRIFTED (c058374f against 68f75b4a). Each end loading whichever is
-    nearest would compare two different cars, which is precisely the fault that made an earlier
-    run of this comparison report a 42% divergence."""
+    Not the frontend's nearest copy — on principle, not because the two differ in substance.
+    They differ by md5 (c058374f against 68f75b4a) and I reported that as DRIFT before opening
+    them. It is ONE TRAILING NEWLINE: 621302 bytes against 621301, identical after rstrip,
+    parsed objects equal, and STATUS.md had recorded that on 2026-08-16.
+
+    **A hash mismatch is evidence of something, not evidence of drift.** This file is full of
+    the rule it breaks — publish a cause only after a disconfirming test — and checking cost one
+    command.
+
+    Reading one file on both sides is still right: two copies is two things that CAN diverge,
+    and the day one gains a key the comparison stops comparing the same car without saying so."""
     import json
     for base in ("LEE3D-Lib", "LEE3D-Lib-main"):
         f = os.path.join(os.path.dirname(ROOT), base, "schema", "fixture-hollow.json")
