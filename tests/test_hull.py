@@ -1213,3 +1213,59 @@ def test_a_pocket_deeper_than_its_wall_is_reported_not_swallowed():
     p = _block_with([up])
     p.update(hullHollow=True, wallThickness=5.0)
     assert hull.plan(p)["pockets_through_wall"] == []
+
+
+@pytest.mark.skipif(not HAS_CQ, reason="needs OpenCascade")
+def test_the_wall_is_measured_on_the_part_that_prints():
+    # pragma: no cover - needs the kernel
+    """CURTIS'S CHECK, ON THE EXACT SOLID.
+
+    The studio's `shellWallStats` and its amber banner work — measured firing at 2.59mm on a rim
+    where 14mm was asked. But they run on a MESH, and what goes to a printer is the STEP. For a
+    load-bearing piece that is the whole distinction.
+
+    Pinned against walls that are known in closed form, so the assertions are arithmetic rather
+    than a tolerance somebody chose:
+
+        5mm wall, no features    5.00mm everywhere
+        5mm wall, 2mm pocket     3.00mm under it       5 - 2
+        5mm wall, 4mm pocket     1.00mm under it       5 - 4, and that is what prints
+
+    The pocket cases also pin WHERE: the thinnest reading has to be under the pocket, at the
+    top of the body, and not somewhere unrelated. A minimum with no position is half an answer
+    on a part with a hundred faces — the studio's gate learned that and reports `worstPatch.at`
+    for the same reason."""
+    block = _block_with([])
+    pocket = lambda d: [{"name": "p", "view": "top", "depth": d,
+                         "poly": [[0.3, 0.3], [0.7, 0.3], [0.7, 0.7], [0.3, 0.7]]}]
+
+    plain = {}
+    hull.build_solid(dict(block, hullHollow=True, wallThickness=5.0), report=plain)
+    w = plain["wall"]
+    assert w["min"] == pytest.approx(5.0, abs=0.05), w
+    assert w["median"] == pytest.approx(5.0, abs=0.05), w
+    assert w["thin"] == 0, "a uniform 5mm wall has no thin patch, and saying it does is a false alarm"
+    assert w["n"] > 50, "too few readings to mean anything"
+
+    for depth, left in ((-2.0, 3.0), (-4.0, 1.0)):
+        rep = {}
+        hull.build_solid(dict(block, hullHollow=True, wallThickness=5.0,
+                              features=pocket(depth)), report=rep)
+        w = rep["wall"]
+        assert w["min"] == pytest.approx(left, abs=0.05), (
+            f"a {abs(depth)}mm pocket in a 5mm wall leaves {left}mm underneath — got {w['min']}")
+        x, y, z = w["worst_at"]
+        assert 30 <= x <= 70 and -12 <= y <= 12, (
+            f"the thinnest wall must be UNDER the pocket (x 30-70, y -12..12), got {w['worst_at']}")
+        assert z > 30, f"and near the top face the pocket was cut into, got z={z}"
+    # the deeper pocket has to leave LESS wall than the shallower one, or the depth is not
+    # reaching the measurement at all
+    assert w["min"] < 2.0
+
+    # A SOLID BODY HAS NO WALL. Marching through one measures the BODY: the first version of
+    # this read 40.00 on a solid 40mm block and called it a wall. `hollow_failed` already
+    # distinguishes "nobody asked" from "asked and it worked", so the question is answered
+    # rather than re-derived.
+    rep = {}
+    hull.build_solid(dict(block, hullHollow=False), report=rep)
+    assert "wall" not in rep, "a solid part has no wall to report, and 40mm is its height"
