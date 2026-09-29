@@ -313,3 +313,46 @@ def test_the_endpoint_says_how_many_pockets_break_through_the_wall(monkeypatch):
     body = r.json()
     assert [g["name"] for g in body["pockets_through_wall"]] == ["roof panel"], body
     assert body["pockets_through_wall"][0]["wall"] == pytest.approx(4.0)
+
+
+def test_the_endpoint_says_how_thin_the_printed_wall_gets(monkeypatch):
+    """The wiring half, in the FAST job — the measurement needs the kernel, the route from
+    `report` to the wire must not be able to rot while it is absent. Same reasoning as the
+    hollow-failed header, and the same reason that one is here."""
+    from fastapi.testclient import TestClient
+    from app import hull
+    from app.main import app
+
+    prof = {
+        "name": "t", "length": 120.0,
+        "topProfile": [[0, 60]], "bottomProfile": [[0, 0]], "widthProfile": [[0, 25]],
+        "sidePoly": [[0, 0], [1, 0], [1, 1], [0, 1]],
+        "topPoly": [[0, 0], [1, 0], [1, 1], [0, 1]],
+        "frontPoly": [[0, 0], [1, 0], [1, 1], [0, 1]],
+        "hullHollow": True, "wallThickness": 4.0,
+    }
+
+    def stub(profile, fmt="step", hollow=False, report=None):
+        if report is not None:
+            report["hollow_failed"] = False
+            report["wall"] = {"n": 120, "min": 1.04, "p10": 3.9, "median": 4.0,
+                              "worst_at": [61.0, 0.0, 55.0], "asked": 4.0, "thin": 7}
+        return b"ISO-10303-21;", "application/step", "t.step"
+    monkeypatch.setattr(hull, "export_bytes", stub)
+    c = TestClient(app)
+
+    r = c.post("/solid", json=prof)
+    assert r.status_code == 200, r.text
+    assert r.headers.get("X-LEE3D-Wall-Min") == "1.04", (
+        "the thinnest wall in the exported part has to reach the caller, "
+        f"got {dict(r.headers)!r}")
+    assert r.headers.get("X-LEE3D-Wall-Thin") == "7"
+
+    # and a part with no cavity reports an EMPTY minimum rather than a misleading number: a
+    # solid body has no wall, and marching through one measures the body.
+    def solid_stub(profile, fmt="step", hollow=False, report=None):
+        return b"ISO-10303-21;", "application/step", "t.step"
+    monkeypatch.setattr(hull, "export_bytes", solid_stub)
+    r = c.post("/solid", json={**prof, "hullHollow": False})
+    assert r.headers.get("X-LEE3D-Wall-Min") == "", dict(r.headers)
+    assert r.headers.get("X-LEE3D-Wall-Thin") == "0"
