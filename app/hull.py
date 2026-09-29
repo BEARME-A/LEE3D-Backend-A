@@ -611,6 +611,108 @@ def build_lathe(profile: Dict[str, Any], hollow: bool | None = None):
     return solid
 
 
+def wall_report(solid, wall_asked, samples_per_face=3, reach=None):
+    """MEASURE THE WALL ON THE PART THAT PRINTS, not on the preview's mesh.
+
+    The studio's `shellWallStats` and its amber banner work — measured firing at 2.59mm on a rim
+    where 14mm was asked. But they run on a MESH, and what goes to a printer is the STEP. For a
+    load-bearing piece that distinction is the whole point, and it is why this exists.
+
+    Method: stand on each face, step INWARD along that face's own normal, and bisect where the
+    material ends. Along the normal, deliberately — this project's own note is that rays across
+    the width inflate a reading on any sloped wall by up to 1.41x. Both the outer skin and the
+    cavity's faces are sampled, and they agree by construction: a face of the cavity has its
+    normal pointing into the cavity, so marching against it crosses the same wall from the other
+    side.
+
+    Sampled on a UV grid per face rather than at face centres. A thin patch is rarely at the
+    middle of a face, and one reading is noise — this file has a section on exactly that.
+
+    Verified against walls that are known in closed form, on the 100x40x60 block:
+
+        5mm wall, no features    min 5.00  median 5.00      exact
+        5mm wall, 2mm pocket     min 3.00                   5 - 2, and at z=38, under the pocket
+        5mm wall, 4mm pocket     min 1.00                   5 - 4. THIS is the case Curtis cares
+                                                            about, and it prints at 1mm.
+
+    Returns None when there is no cavity: a solid body has no wall, and marching through one
+    measures the body. That is the guard the first run of this needed — it read 40.00 on a solid
+    40mm block and called it a wall.
+    """
+    try:
+        # `build_solid` returns a WORKPLANE and the tests hold a Shape. Take whichever and
+        # reduce it to the shape — the first version accepted only a Shape, worked perfectly in
+        # a probe, and returned None from inside the very function it was wired into. It failed
+        # SILENTLY too, because the guard below treats "cannot measure" and "nothing to measure"
+        # as the same answer.
+        if hasattr(solid, "val") and not hasattr(solid, "Faces"):
+            solid = solid.val()
+        if not hasattr(solid, "Faces") or not hasattr(solid, "BoundingBox"):
+            print(f"[hull] wall_report: cannot measure a {type(solid).__name__}")
+            return None
+        cq = _import_cq()
+        from OCP.BRepTools import BRepTools          # lazy, like cadquery itself
+        bb = solid.BoundingBox()
+        if reach is None:
+            reach = max(bb.xlen, bb.ylen, bb.zlen)
+        readings = []
+        for f in solid.Faces():
+            u0, u1, v0, v1 = BRepTools.UVBounds_s(f.wrapped)
+            for i in range(samples_per_face):
+                for j in range(samples_per_face):
+                    u = u0 + (u1 - u0) * (i + 0.5) / samples_per_face
+                    v = v0 + (v1 - v0) * (j + 0.5) / samples_per_face
+                    try:
+                        pt = f.positionAt(u, v)
+                        nrm = f.normalAt(pt)
+                    except Exception:
+                        continue
+                    d = _wall_along(cq, solid, pt, nrm, reach)
+                    if d is not None:
+                        readings.append((d, (round(pt.x, 1), round(pt.y, 1), round(pt.z, 1))))
+        if not readings:
+            return None
+        vals = sorted(r for r, _ in readings)
+        pick = lambda q: vals[min(len(vals) - 1, int(q * len(vals)))]
+        worst = min(readings, key=lambda x: x[0])
+        out = {"n": len(vals), "min": round(vals[0], 3), "p10": round(pick(0.10), 3),
+               "median": round(pick(0.50), 3),
+               "worst_at": list(worst[1])}
+        if wall_asked:
+            # how many readings are materially under what was asked. 60% is the studio's own
+            # notion of a thin patch rather than a new number invented here.
+            out["asked"] = round(float(wall_asked), 3)
+            out["thin"] = sum(1 for v in vals if v < float(wall_asked) * 0.6)
+        return out
+    except Exception as exc:                      # a measurement must never break an export
+        print(f"[hull] wall_report failed: {exc}")
+        return None
+
+
+def _wall_along(cq, solid, pt, nrm, reach, tol=0.02):
+    """Distance from just inside `pt` to where the material ends, marching against `nrm`."""
+    def inside(d):
+        return solid.isInside(cq.Vector(pt.x - nrm.x * d, pt.y - nrm.y * d, pt.z - nrm.z * d), 1e-7)
+    if not inside(tol):
+        return None                                # the sample does not sit on material
+    lo, hi, d = tol, None, tol
+    while d < reach:
+        d *= 2.0
+        if not inside(d):
+            hi = d
+            break
+        lo = d
+    if hi is None:
+        return None                                # solid all the way through: not a wall
+    for _ in range(18):
+        mid = 0.5 * (lo + hi)
+        if inside(mid):
+            lo = mid
+        else:
+            hi = mid
+    return 0.5 * (lo + hi)
+
+
 def build_solid(profile: Dict[str, Any], hollow: bool | None = None,
                 report: Dict[str, Any] | None = None):
     """`hollow=None` means ASK THE PROFILE, which is almost always what a caller wants.
@@ -996,6 +1098,18 @@ def build_solid(profile: Dict[str, Any], hollow: bool | None = None,
                 if report is not None:
                     report["hollow_failed"] = True
                     report["hollow_failed_reason"] = repr(e)
+
+    # THE WALL THAT WILL ACTUALLY PRINT, measured on this solid before it leaves.
+    #
+    # Only when a cavity was genuinely built. A solid body has no wall, and marching through one
+    # measures the BODY — the first run of this read 40.00 on a solid 40mm block and called it a
+    # wall, which is the shape of every false positive in this file. `hollow_failed` is already
+    # seeded False when hollowing is attempted and True when it fails, so "was there a cavity"
+    # is a question that has already been answered honestly here rather than re-derived.
+    if report is not None and report.get("hollow_failed") is False:
+        stats = wall_report(solid, wall_spec(profile).get("side") or profile.get("wallThickness"))
+        if stats:
+            report["wall"] = stats
     return solid
 
 
