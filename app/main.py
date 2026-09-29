@@ -223,6 +223,14 @@ def solid(
                  # of 86.9-88.9 becomes nothing at one station and 0.8mm at another.
                  # Reported rather than resolved, like the headers above it.
                  "X-LEE3D-Pockets-Through-Wall": str(len(p["pockets_through_wall"])),
+                 # THE THINNEST WALL IN THE PART THAT PRINTS, in mm, measured on the exact solid
+                 # rather than on the studio's mesh. The studio's own gate reads a MESH; this is
+                 # the STEP. For a load-bearing piece that is the whole distinction — measured on
+                 # a 5mm-walled block with a 4mm pocket, the wall under it prints at 1.00mm.
+                 # Empty when there was no cavity to measure.
+                 "X-LEE3D-Wall-Min": (f"{report['wall']['min']:.2f}"
+                                      if report.get("wall") else ""),
+                 "X-LEE3D-Wall-Thin": str(report.get("wall", {}).get("thin", 0)),
                  # "1" only when a shell was ASKED FOR and the cavity could not be built, so
                  # this file is solid. "0" covers both "hollowed fine" and "never asked" —
                  # the studio only needs to warn about the one case where what it got is not
