@@ -636,7 +636,13 @@ def read_sheet(data: bytes, page_index: int = 0, want_geometry: bool = False) ->
     inferred = None if printed else infer_plot_scale(strokes, words)
     used = printed or inferred
     out = {
+        # HOW MANY PAGES THE DOCUMENT HAS, not just which one this is. `extract_geometry` has
+        # known it all along and it stopped here, so a client had no way to tell page 3 of 8
+        # from the only page there is — and the studio landed on the first sheet carrying any
+        # titled detail and offered no way to reach the rest. On a real permit set that means
+        # stopping at a grading plan while the column and the sign sit on pages 6 and 8.
         "page": {"index": page_index,
+                 "count": g.get("page_count"),
                  "width_mm": g.get("width_mm") or g.get("page_width_mm"),
                  "height_mm": g.get("height_mm") or g.get("page_height_mm")},
         "sheet": sheet_identity(words),
